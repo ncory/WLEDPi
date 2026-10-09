@@ -1,0 +1,23 @@
+[Unit]
+Description=WLED-Pi LED controller (WLED-compatible web UI and API)
+Documentation=file:///opt/wled-pi/README.md
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/wled-pi
+ExecStart=/opt/wled-pi/venv/bin/python -m wledpi --config /etc/wled-pi/config.json
+Restart=always
+RestartSec=3
+# Root is required for /dev/mem (Pi 4 rpi_ws281x) and /dev/leds* (Pi 5); everything else is locked down.
+User=root
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/etc/wled-pi /var/lib/wled-pi -/boot/firmware
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

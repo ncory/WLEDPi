@@ -1,0 +1,18 @@
+WLED-Pi
+Copyright (c) 2026 the WLED-Pi contributors
+
+Licensed under the European Union Public Licence, version 1.2 (EUPL-1.2),
+the same licence as WLED, whose effect algorithms this project re-implements.
+You may not use this work except in compliance with the Licence.
+The full text of the Licence is available in 23 EU languages at:
+https://interoperable-europe.ec.europa.eu/collection/eupl/eupl-text-eupl-12
+
+Unless required by applicable law or agreed to in writing, software distributed
+under the Licence is distributed on an "AS IS" basis, WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, either express or implied.
+
+Third-party components (not included in this repository):
+- WLED web interface and palette data (https://github.com/wled/WLED, EUPL-1.2),
+  downloaded at install time by tools/fetch_wled_assets.py.
+- rpi_ws281x (BSD-2-Clause), installed from PyPI on Raspberry Pi 4.
+- numpy (BSD-3-Clause), installed from Raspberry Pi OS packages.

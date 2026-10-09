@@ -1,0 +1,15 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "wledpi-virtual",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": [
+        "run", "--no-project", "--python", "3.13", "--with", "numpy",
+        "python", "-B", "-m", "wledpi", "--virtual", "--port", "8080",
+        "--data-dir", "./data", "--www-dir", "./www", "--assets", "./assets/palettes.json"
+      ],
+      "port": 8080
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WLED-Pi</title>
+<style>body{background:#222;color:#fff;font-family:Helvetica,Verdana,sans-serif;max-width:560px;margin:0 auto;padding:20px;text-align:center}
+button,a.btn{background:#333;color:#fff;border:.25em solid #333;border-radius:24px;padding:8px 16px;font-size:1em;margin:6px;cursor:pointer;text-decoration:none;display:inline-block}
+input[type=range]{width:90%}code{background:#111;padding:2px 5px;border-radius:5px}p{color:#bbb;line-height:1.4}</style></head>
+<body><h1>WLED-Pi</h1>
+<p>The WLED web interface isn't installed yet, so this is a minimal control page. Install it on the Pi with:<br>
+<code>sudo /opt/wled-pi/venv/bin/python /opt/wled-pi/tools/fetch_wled_assets.py</code></p>
+<button id="pw">On / Off</button>
+<p><label>Brightness<br><input type="range" id="bri" min="1" max="255"></label></p>
+<p><label>Colour <input type="color" id="col" value="#ffa000"></label></p>
+<p><label>Effect <select id="fx"></select></label></p>
+<a class="btn" href="/settings">Settings</a>
+<script>
+const $=i=>document.getElementById(i);
+const post=o=>fetch('/json/state',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(o)});
+fetch('/json').then(r=>r.json()).then(j=>{
+ $('bri').value=j.state.bri;
+ j.effects.forEach((n,i)=>{if(n!=='RSVD'){const o=document.createElement('option');o.value=i;o.textContent=n;$('fx').appendChild(o);}});
+ $('fx').value=j.state.seg[0].fx;});
+$('pw').onclick=()=>post({on:'t'});
+$('bri').oninput=e=>post({bri:+e.target.value});
+$('col').oninput=e=>{const h=e.target.value.slice(1);post({seg:{col:[h]}});};
+$('fx').onchange=e=>post({seg:{fx:+e.target.value,fxdef:true}});
+</script></body></html>

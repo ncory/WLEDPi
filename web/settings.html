@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>WLED-Pi Settings</title>
+<style>
+:root{--bg:#222;--c2:#333;--c3:#444;--tx:#fff;--mu:#aaa;--ok:#2c8a4a;--wa:#b37b00;--er:#c0392b;--ac:#4caf50}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font-family:Helvetica,Verdana,sans-serif;font-size:16px;
+ padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+main{max-width:560px;margin:0 auto;padding:12px 14px 80px;text-align:center}
+h1{font-size:1.6em;margin:.6em 0 .1em}
+h2{font-size:1.25em;margin:1.6em 0 .5em;padding-top:1em;border-top:1px solid var(--c3)}
+h3{font-size:1em;margin:.2em 0 .6em}
+p,.hint{color:var(--mu);font-size:.9em;line-height:1.4}
+label{display:block;margin:.55em 0}
+input[type=number],input[type=text],select{background:var(--c2);color:var(--tx);border:0;border-radius:8px;padding:6px 8px;
+ font-size:1em;margin-left:4px}
+input[type=number]{width:6em}
+input[type=text]{width:12em}
+input[type=checkbox]{transform:scale(1.3);margin:0 6px;vertical-align:middle}
+button,.btn{background:var(--c2);color:var(--tx);border:.25em solid var(--c2);border-radius:24px;padding:8px 16px;
+ font-size:1em;margin:6px 4px;cursor:pointer;display:inline-block;text-decoration:none;font-family:inherit}
+button:hover,.btn:hover{border-color:var(--c3)}
+button:focus-visible,.btn:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--ac);outline-offset:2px}
+button.pri{background:var(--ok);border-color:var(--ok)}
+.out{background:#2a2a2a;border-radius:12px;padding:10px 12px;margin:10px 0;text-align:left}
+.out .row{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:center}
+.out .row label{margin:.35em 0}
+.warn{color:#ffb84d;font-size:.88em;margin:.3em 0}
+.err{color:#ff6b5b;font-size:.88em;margin:.3em 0}
+.okt{color:#7ddc8e;font-size:.88em;margin:.3em 0}
+.banner{border-radius:12px;padding:10px 12px;margin:12px 0;text-align:left;font-size:.92em;line-height:1.4}
+.banner.w{background:#3a2f12}.banner.e{background:#3d1f1c}.banner.i{background:#1f2f3a}
+code{background:#111;padding:2px 5px;border-radius:5px;font-size:.88em;word-break:break-all}
+details{margin-top:.4em}summary{cursor:pointer;color:var(--mu)}
+#toast{position:fixed;left:50%;bottom:calc(16px + env(safe-area-inset-bottom));transform:translateX(-50%);background:var(--c3);
+ padding:10px 18px;border-radius:20px;display:none;max-width:90%}
+.sticky{position:sticky;bottom:0;background:var(--bg);padding:8px 0 calc(8px + env(safe-area-inset-bottom));border-top:1px solid var(--c3)}
+@media (prefers-reduced-motion:no-preference){button{transition:border-color .15s}}
+</style>
+</head>
+<body>
+<main>
+<a class="btn" href="/">&#x2190; Back</a>
+<h1>WLED-Pi settings</h1>
+<p id="sub">Loading&hellip;</p>
+<div id="banners"></div>
+
+<h2>Device</h2>
+<label>Name <input type="text" id="name" maxlength="32"></label>
+
+<h2>LED outputs</h2>
+<p id="pinhint" class="hint"></p>
+<div id="outs"></div>
+<button id="addOut">Add output</button>
+
+<h2>Light</h2>
+<label>Target frame rate <input type="number" id="fps" min="1" max="250"> FPS</label>
+<label><input type="checkbox" id="gc">Gamma-correct colours</label>
+<label>Gamma value <input type="number" id="gv" min="1" max="3.5" step="0.1"></label>
+<label>Default transition <input type="number" id="tr" min="0" max="65535"> &times; 100 ms</label>
+<label>Random palette changes every <input type="number" id="rpi" min="1" max="255"> s</label>
+<h3>Power limiter</h3>
+<label><input type="checkbox" id="abl">Limit current (brightness is reduced automatically)</label>
+<label>Power supply budget <input type="number" id="maxma" min="250" max="100000" step="50"> mA</label>
+<label>Current per LED at full white <input type="number" id="mapl" min="1" max="255"> mA</label>
+<p class="hint">55 mA suits typical WS2812B; use 30 mA for "eco" LEDs.</p>
+
+<h2>Startup</h2>
+<label><input type="checkbox" id="restore">Restore the last state after a restart</label>
+<label>Apply preset at startup <input type="number" id="bootps" min="0" max="250"> <span class="hint">(0 = none, overrides restore)</span></label>
+<label><input type="checkbox" id="defon">Turn LEDs on at startup</label>
+<label>Startup brightness <input type="number" id="defbri" min="1" max="255"></label>
+<label><input type="checkbox" id="offexit">Turn LEDs off when the service stops</label>
+
+<h2>Network</h2>
+<label>Web UI port <input type="number" id="port" min="1" max="65535"></label>
+<label>Listen address <input type="text" id="bind"></label>
+<p class="hint">Port changes take effect after the service restarts. Use 0.0.0.0 for all interfaces.</p>
+
+<h2>Presets</h2>
+<p class="hint">Back up or restore <code>presets.json</code>. Files exported from an ESP32 or ESP8266 WLED work as-is.</p>
+<a class="btn" href="/presets.json" download="presets.json">Download presets</a>
+<label class="btn" for="pfile" tabindex="0">Restore presets&hellip;</label>
+<input type="file" id="pfile" accept=".json,application/json" style="display:none">
+
+<h2>Service</h2>
+<button id="restart">Restart service</button>
+<button id="reboot">Reboot Raspberry Pi</button>
+
+<div class="sticky"><button class="pri" id="save">Save</button><button id="saveR">Save &amp; restart</button></div>
+</main>
+<div id="toast" role="status" aria-live="polite"></div>
+<script>
+const $=id=>document.getElementById(id);
+let S=null;
+const ORD=["GRB","RGB","BRG","RBG","BGR","GBR"];
+const SPI0=[7,8,9,10,11],SPI1=[16,17,18,19,20,21],PI4=[12,13,18,19,21];
+function toast(t,ms){const e=$('toast');e.textContent=t;e.style.display='block';clearTimeout(e._t);e._t=setTimeout(()=>e.style.display='none',ms||3500);}
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+async function api(path,body){
+  const r=await fetch(path,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  let j={};try{j=await r.json();}catch(e){}
+  if(!r.ok||j.ok===false)throw new Error(j.error||('HTTP '+r.status));
+  return j;
+}
+function resolved(drv){if(drv!=='auto')return drv;return S.pi===5?'pio':(S.pi===4?'ws281x':'virtual');}
+function pinNotes(o){
+  const n=[],g=+o.gpio,d=resolved(o.driver);
+  if(SPI0.includes(g))n.push(['warn','GPIO'+g+' is an SPI0 pin — pick another to keep SPI free.']);
+  else if(SPI1.includes(g))n.push(['warn','GPIO'+g+' is an SPI1 (auxiliary SPI) pin.']);
+  if(d==='ws281x'&&!PI4.includes(g))n.push(['err','On a Pi 4 only GPIO 12, 13, 18, 19 (PWM) or 21 (PCM) can drive LEDs.']);
+  if(d==='pio'&&(g<0||g>27))n.push(['err','Use a header GPIO between 0 and 27.']);
+  return n;
+}
+function outHtml(o,i){
+  const st=(S.outputs[i]||{});
+  const notes=pinNotes(o).map(n=>`<div class="${n[0]}">${esc(n[1])}</div>`).join('');
+  const live=st.error?`<div class="err">Not running: ${esc(st.error)}</div>`:(st.status?`<div class="okt">Running: ${esc(st.status)}</div>`:'');
+  return `<div class="out" data-i="${i}"><h3>Output ${i+1}</h3>
+  <div class="row">
+   <label>Driver <select data-k="driver">${['auto','ws281x','pio','virtual'].map(v=>`<option value="${v}"${o.driver===v?' selected':''}>${{auto:'Automatic',ws281x:'Pi 4 PWM/PCM',pio:'Pi 5 PIO',virtual:'None (test)'}[v]}</option>`).join('')}</select></label>
+   <label>GPIO <input type="number" data-k="gpio" min="0" max="53" value="${o.gpio}"></label>
+   <label>LEDs <input type="number" data-k="count" min="1" max="10000" value="${o.count}"></label>
+   <label>Start <input type="number" data-k="start" min="0" value="${o.start}"></label>
+   <label>Order <select data-k="order">${ORD.map(v=>`<option${o.order===v?' selected':''}>${v}</option>`).join('')}</select></label>
+   <label><input type="checkbox" data-k="rgbw"${o.rgbw?' checked':''}>RGBW</label>
+   <label><input type="checkbox" data-k="reverse"${o.reverse?' checked':''}>Reversed</label>
+  </div>${notes}${live}
+  <details><summary>Advanced</summary><div class="row">
+   <label>DMA channel <input type="number" data-k="dma" min="0" max="14" value="${o.dma}"></label>
+   <label><input type="checkbox" data-k="invert"${o.invert?' checked':''}>Invert signal</label>
+   <label>Device <input type="text" data-k="device" value="${esc(o.device||'')}" placeholder="/dev/leds0"></label>
+   <label><input type="checkbox" data-k="pio_passthrough"${o.pio_passthrough?' checked':''}>PIO pass-through</label>
+  </div><p class="hint">DMA and invert apply to the Pi 4 driver; device and pass-through to the Pi 5 driver.</p></details>
+  ${S.config.outputs.length>1?`<button data-rm="${i}">Remove output</button>`:''}</div>`;
+}
+function readOuts(){
+  return [...document.querySelectorAll('.out')].map(div=>{
+    const o={};div.querySelectorAll('[data-k]').forEach(e=>{const k=e.dataset.k;
+      o[k]=e.type==='checkbox'?e.checked:(e.type==='number'?+e.value:e.value);});return o;});
+}
+function renderOuts(){
+  $('outs').innerHTML=S.config.outputs.map(outHtml).join('');
+  document.querySelectorAll('.out [data-k]').forEach(e=>e.addEventListener('change',()=>{S.config.outputs=readOuts();renderOuts();}));
+  document.querySelectorAll('[data-rm]').forEach(b=>b.onclick=()=>{S.config.outputs=readOuts();S.config.outputs.splice(+b.dataset.rm,1);renderOuts();});
+  $('addOut').style.display=S.config.outputs.length>=4?'none':'';
+}
+function banners(){
+  const b=[],bt=S.boot;
+  if(!S.ui_installed)b.push(['w','The WLED web interface files are not installed yet. Run <code>sudo /opt/wled-pi/venv/bin/python /opt/wled-pi/tools/fetch_wled_assets.py</code> on the Pi.']);
+  if(bt&&!bt.in_sync&&(bt.desired.length||bt.current.length)){
+    const want=bt.desired.length?bt.desired.map(l=>'<code>'+esc(l)+'</code>').join('<br>'):'(nothing)';
+    b.push(['w',`<b>Boot configuration needs updating</b> (${esc(bt.path)}). Wanted:<br>${want}<br>
+     <button id="wboot">Write boot config</button> then reboot the Pi.`]);
+  }
+  S.outputs.forEach((o,i)=>{if(o.error)b.push(['e','Output '+(i+1)+': '+esc(o.error)]);});
+  $('banners').innerHTML=b.map(x=>`<div class="banner ${x[0]}">${x[1]}</div>`).join('');
+  const wb=$('wboot');if(wb)wb.onclick=async()=>{try{await api('/api/bootconfig',{});toast('Boot config written. Reboot to apply.',6000);load();}catch(e){toast(e.message,6000);}};
+}
+function fill(){
+  const c=S.config;
+  $('sub').textContent=`Version ${S.version} on ${S.model}`;
+  $('pinhint').innerHTML=S.pi===5?'Pi 5: any GPIO 0&ndash;27 works. GPIO 12 or 13 keep both SPI buses free. Up to 4 outputs.':
+    (S.pi===4?'Pi 4: GPIO 12 or 13 (PWM) keep SPI free; 18 and 19 are also PWM but are SPI1 pins. PWM needs onboard analog audio off (handled by the boot config).':
+    'Not running on a Raspberry Pi: outputs fall back to "None".');
+  $('name').value=c.name;$('fps').value=c.fps;$('gc').checked=c.gamma.color;$('gv').value=c.gamma.value;
+  $('tr').value=c.defaults.transition;$('rpi').value=c.random_palette_interval;
+  $('abl').checked=c.abl.enabled;$('maxma').value=c.abl.max_ma;$('mapl').value=c.abl.ma_per_led;
+  $('restore').checked=c.defaults.restore_state;$('bootps').value=c.defaults.boot_preset;$('defon').checked=c.defaults.on;
+  $('defbri').value=c.defaults.bri;$('offexit').checked=c.off_on_exit!==false;
+  $('port').value=c.http.port;$('bind').value=c.http.bind;
+  renderOuts();banners();
+}
+function collect(){
+  const c=JSON.parse(JSON.stringify(S.config));
+  c.name=$('name').value;c.fps=+$('fps').value;c.gamma={color:$('gc').checked,value:+$('gv').value};
+  c.defaults.transition=+$('tr').value;c.random_palette_interval=+$('rpi').value;
+  c.abl={enabled:$('abl').checked,max_ma:+$('maxma').value,ma_per_led:+$('mapl').value};
+  c.defaults.restore_state=$('restore').checked;c.defaults.boot_preset=+$('bootps').value;c.defaults.on=$('defon').checked;
+  c.defaults.bri=+$('defbri').value;c.off_on_exit=$('offexit').checked;
+  c.http={port:+$('port').value,bind:$('bind').value||'0.0.0.0'};c.outputs=readOuts();
+  return c;
+}
+async function load(){try{S=await api('/api/config');fill();}catch(e){$('sub').textContent='Could not load settings: '+e.message;}}
+async function save(restart){
+  try{
+    const r=await api('/api/config',{config:collect()});S=r;fill();
+    if(restart){await api('/api/restart',{});toast('Saved. Restarting…');
+      const p=S.config.http.port;setTimeout(()=>{location.href=location.protocol+'//'+location.hostname+':'+p+'/settings';},5000);}
+    else toast(r.restart_needed?'Saved. Restart the service to use the new port.':'Saved.');
+  }catch(e){toast('Not saved: '+e.message,6000);}
+}
+$('save').onclick=()=>save(false);$('saveR').onclick=()=>save(true);
+$('addOut').onclick=()=>{S.config.outputs=readOuts();const last=S.config.outputs[S.config.outputs.length-1];
+  S.config.outputs.push(Object.assign({},last,{gpio:last.gpio===12?13:last.gpio+1,start:last.start+last.count,device:''}));renderOuts();};
+$('restart').onclick=async()=>{try{await api('/api/restart',{});toast('Restarting…');setTimeout(()=>location.reload(),5000);}catch(e){toast(e.message);}};
+$('reboot').onclick=async()=>{if(!confirm('Reboot the Raspberry Pi now? Everything running on it restarts.'))return;
+  try{await api('/api/reboot',{});toast('Rebooting… this page reconnects when the Pi is back.',10000);setTimeout(()=>location.reload(),60000);}catch(e){toast(e.message);}};
+$('pfile').onchange=async e=>{
+  const f=e.target.files[0];if(!f)return;const fd=new FormData();fd.append('data',f,'/presets.json');
+  const r=await fetch('/upload',{method:'POST',body:fd});toast(r.ok?'Presets restored.':('Restore failed: '+await r.text()),5000);e.target.value='';load();};
+document.querySelector('label[for=pfile]').addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();$('pfile').click();}});
+load();
+</script>
+</body>
+</html>

@@ -1,0 +1,29 @@
+{
+  "name": "WLED-Pi",
+  "http": { "port": 8080, "bind": "0.0.0.0" },
+  "fps": 42,
+  "outputs": [
+    {
+      "driver": "auto",
+      "gpio": 12,
+      "count": 60,
+      "start": 0,
+      "order": "GRB",
+      "rgbw": false,
+      "reverse": false,
+      "dma": 10,
+      "invert": false,
+      "device": "",
+      "pio_passthrough": true
+    }
+  ],
+  "gamma": { "color": true, "value": 2.8 },
+  "abl": { "enabled": false, "max_ma": 5000, "ma_per_led": 55 },
+  "defaults": { "on": true, "bri": 128, "transition": 7, "boot_preset": 0, "restore_state": true },
+  "max_segments": 32,
+  "random_palette_interval": 5,
+  "off_on_exit": true,
+  "data_dir": "/var/lib/wled-pi",
+  "www_dir": "/opt/wled-pi/www",
+  "assets": "/opt/wled-pi/assets/palettes.json"
+}
