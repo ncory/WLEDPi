@@ -67,5 +67,6 @@ On a machine without numpy (e.g. the Mac), prefix with `uv run --no-project --py
    TV Simulator 116.
 
 ## Repo housekeeping
-- LICENSE is a short EUPL-1.2 notice (matches WLED); replace with the full text so GitHub detects it.
+- LICENSE is the full EUPL-1.2 text (matches WLED) under a two-line copyright header; keep it verbatim so
+  GitHub keeps detecting it.
 - If committing from Windows: `git update-index --chmod=+x install.sh uninstall.sh tools/fetch_wled_assets.py`.

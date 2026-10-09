@@ -136,3 +136,6 @@ EUPL-1.2, matching WLED. Effect algorithms are re-implementations of WLED's (by 
 Andrew Tuline and the WLED contributors), several of which build on FastLED examples by Mark Kriegsman.
 WLED's web interface and palette data are not part of this repository; they are downloaded from the WLED project
 when you install. WLED-Pi is not affiliated with the WLED project.
+
+The full licence text is in [LICENSE](LICENSE). Dependencies are installed separately and keep their own licences:
+`rpi_ws281x` (BSD-2-Clause, from PyPI on Raspberry Pi 4) and `numpy` (BSD-3-Clause, from Raspberry Pi OS packages).
