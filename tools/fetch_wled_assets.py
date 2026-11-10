@@ -6,7 +6,7 @@ WLED-Pi), copies wled00/data/ (the web UI) to the www directory and extracts
 the gradient palettes into palettes.json.
 
   sudo /opt/wled-pi/venv/bin/python /opt/wled-pi/tools/fetch_wled_assets.py
-  ... --from-file WLED-0.15.3.tar.gz     (offline: tarball downloaded elsewhere)
+  ... --from-file WLED-16.0.1.tar.gz     (offline: tarball downloaded elsewhere)
   ... --from-dir ~/WLED                  (offline: a WLED git checkout)
 """
 import argparse
@@ -19,7 +19,7 @@ import sys
 import tarfile
 import urllib.request
 
-TAG = "v0.15.3"
+TAG = "v16.0.1"   # WLED-Pi follows WLED 16 (palette data and gamma model); older tags are not supported
 URL = "https://github.com/wled/WLED/archive/refs/tags/{tag}.tar.gz"
 
 

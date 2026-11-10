@@ -1,4 +1,5 @@
 """WLED JSON API semantics: state/info serialisation and applying state changes."""
+import colorsys
 import json
 import logging
 import math
@@ -11,12 +12,15 @@ import time
 from . import __version__, VERSION_ID, WLED_VERSION
 from .config import atomic_write_json, save as save_config
 from .effects import EFFECTS, MODE_COUNT, effect_names, effect_data, effect_defaults
-from .palettes import PaletteBank
+from .palettes import PaletteBank, FIXED_PALETTE_COUNT, CUSTOM_ID_BASE, MAX_CUSTOM
 from .presets import PresetStore, Playlist
 from .segment import Segment
 from .strip import Strip
 
 log = logging.getLogger("wledpi.state")
+
+REPO = "ncory/WLEDPi"          # shown as the "GitHub" link in the UI's Info panel
+_last_random_hue = 0
 
 
 # ---------------------------------------------------------------------------- value helpers
@@ -109,6 +113,18 @@ def parse_color(v, cur):
             return [0, 0, 0, 0] if v == 0 else None
         return kelvin_rgb(int(v))
     return None
+
+
+def random_color():
+    global _last_random_hue
+    while True:
+        h = random.randrange(256)
+        d = abs(_last_random_hue - h)
+        if min(d, 255 - d) >= 42:
+            break
+    _last_random_hue = h
+    r, g, b = colorsys.hsv_to_rgb(h / 256.0, 1.0, 1.0)
+    return [int(round(r * 255)), int(round(g * 255)), int(round(b * 255)), 0]
 
 
 def loads_lenient(text):
@@ -406,6 +422,7 @@ class Controller:
             out["on"] = st.on
             out["bri"] = st.bri
             out["transition"] = st.transition
+            out["bs"] = st.blend_style
         out["mainseg"] = self._mainseg_id()
         segs = []
         maxseg = self.cfg["max_segments"]
@@ -521,6 +538,8 @@ class Controller:
                 self.lor = get_val(obj["lor"], self.lor, 0, 2)
             if "mainseg" in obj:
                 self.mainseg = get_val(obj["mainseg"], self.mainseg, 0, len(st.segments) - 1)
+            if "bs" in obj:            # WLED 16 transition style (0 = fade)
+                st.blend_style = get_val(obj["bs"], st.blend_style, 0, 255) & 0x1F
 
             seg_changed = False
             if "seg" in obj:
@@ -528,6 +547,10 @@ class Controller:
                 if self.playlist is not None and not preset_id and not keep_playlist and _has_fx(obj["seg"]):
                     self.stop_playlist()
                 seg_changed = self.apply_segments(obj["seg"], tr_ms, preset_id)
+            if get_bool(obj.get("rSeg"), False):       # WLED 16 "Reset segments"
+                st.reset_segments()
+                self.mainseg = 0
+                seg_changed = True
 
             if isinstance(obj.get("win"), str):
                 from .httpapi import apply_win
@@ -568,12 +591,20 @@ class Controller:
                     self.presets.delete(pid)
                     if self.ps == pid:
                         self.ps = -1
-            if obj.get("rmcpal") and self.palettes.custom:       # the UI's "Remove last custom palette"
-                try:
-                    os.remove(os.path.join(self.data_dir, "palette%d.json" % (len(self.palettes.custom) - 1)))
-                except OSError as e:
-                    log.warning("Could not remove custom palette: %s", e)
-                self.palettes.load_custom(self.data_dir)
+            if "rmcpal" in obj:
+                # WLED 16: {"rmcpal": n} deletes palette<n>.json; WLED 0.15's UI sent true for "the last one"
+                v = obj["rmcpal"]
+                n = (len(self.palettes.custom) - 1) if v is True else get_val(v, -1, 0, MAX_CUSTOM - 1)
+                if 0 <= n < MAX_CUSTOM:
+                    try:
+                        os.remove(os.path.join(self.data_dir, "palette%d.json" % n))
+                    except FileNotFoundError:
+                        pass
+                    except OSError as e:
+                        log.warning("Could not remove custom palette: %s", e)
+                    self.palettes.load_custom(self.data_dir)
+                    for sg in st.segments:
+                        sg.pal = self.palettes.valid_id(sg.pal)
             if obj.get("rb"):
                 self.reinit()
         self.changed()
@@ -631,6 +662,8 @@ class Controller:
                 return False
             ns = Segment(st, len(segs), start, min(stop, total))
             ns.sel = True
+            if preset_id:           # WLED 16: black unless created by hand, then the default orange
+                ns.colors[0] = [0, 0, 0, 0]
             segs.append(ns)
             sid = ns.id
         seg = segs[sid]
@@ -685,7 +718,7 @@ class Controller:
         col = e.get("col")
         if isinstance(col, list):
             for i, c in enumerate(col[:3]):
-                nc = parse_color(c, seg.colors[i])
+                nc = random_color() if c == "r" else parse_color(c, seg.colors[i])
                 if nc is not None:
                     seg.colors[i] = nc
 
@@ -719,16 +752,11 @@ class Controller:
             if k in e:
                 setattr(seg, k, get_val(e[k], getattr(seg, k), 0, hi))
         if "pal" in e:
-            pmax = self.palettes.count - 1
             v = e["pal"]
             if isinstance(v, str) and v.strip() in ("~", "~-", "r"):
-                seg.pal = get_val(v, seg.pal, 0, pmax)
+                seg.pal = get_val(v, seg.pal, 0, FIXED_PALETTE_COUNT - 1)
             else:
-                p = get_val(v, seg.pal, 0, 255)
-                ncust = len(self.palettes.custom)
-                if p > pmax and p < 256 - ncust:
-                    p = 0
-                seg.pal = p
+                seg.pal = self.palettes.valid_id(get_val(v, seg.pal, 0, 255))
         for k in ("o1", "o2", "o3"):
             if k in e:
                 setattr(seg, k, get_bool(e[k], getattr(seg, k)))
@@ -736,6 +764,8 @@ class Controller:
             seg.si = get_val(e["si"], seg.si, 0, 3)
         if "m12" in e:
             seg.m12 = get_val(e["m12"], seg.m12, 0, 7)
+        if "bm" in e:                  # WLED 16 segment blend mode (layering)
+            seg.bm = get_val(e["bm"], seg.bm, 0, 255)
 
         iarr = e.get("i")
         if isinstance(iarr, list):
@@ -805,13 +835,13 @@ class Controller:
             d.update(start=s.start, stop=s.stop, grp=s.grp, spc=s.spc, of=s.of)
         if not for_preset:
             d["len"] = s.length
-        d.update(on=s.on, frz=s.frz, bri=s.bri if s.bri else 255, cct=s.cct, set=s.set)
+        d.update(on=s.on, frz=s.frz, bri=s.bri if s.bri else 255, cct=s.cct, set=s.set, lc=s.light_caps())
         if s.name:
             d["n"] = s.name
         w = self.strip.has_white
         d["col"] = [list(c[:4]) if w else list(c[:3]) for c in s.colors]
         d.update(fx=s.fx, sx=s.sx, ix=s.ix, pal=s.pal, c1=s.c1, c2=s.c2, c3=s.c3, sel=s.sel, rev=s.rev, mi=s.mi,
-                 o1=s.o1, o2=s.o2, o3=s.o3, si=s.si, m12=s.m12)
+                 o1=s.o1, o2=s.o2, o3=s.o3, si=s.si, m12=s.m12, bm=s.bm)
         return d
 
     def state_json(self):
@@ -821,7 +851,7 @@ class Controller:
             if self.nl["on"]:
                 rem = max(0, int((self._nl_t0 + self.nl["dur"] * 60000 - st.ms()) / 1000))
             return {
-                "on": st.on, "bri": st.bri, "transition": st.transition,
+                "on": st.on, "bri": st.bri, "transition": st.transition, "bs": st.blend_style,
                 "ps": self.ps if self.ps > 0 else -1, "pl": self.pl, "ledmap": 0,
                 "nl": dict(self.nl, rem=rem),
                 "udpn": dict(self.udpn), "lor": self.lor, "mainseg": self._mainseg_id(),
@@ -850,7 +880,7 @@ class Controller:
             u["Model"] = [st.model]
         now = time.localtime()
         return {
-            "ver": WLED_VERSION, "vid": VERSION_ID, "cn": "Pi", "release": "WLED-Pi",
+            "ver": WLED_VERSION, "vid": VERSION_ID, "cn": "Pi", "release": "WLED-Pi", "repo": REPO,
             "leds": {"count": st.total, "pwr": st.pwr, "fps": st.fps,
                      "maxpwr": cfg["abl"]["max_ma"] if cfg["abl"]["enabled"] else 0,
                      "maxseg": cfg["max_segments"], "bootps": cfg["defaults"]["boot_preset"],
@@ -858,7 +888,8 @@ class Controller:
                      "wv": 2 if st.has_white else 0, "cct": 0},
             "str": False, "name": cfg["name"], "udpport": 21324, "simplifiedui": False,
             "live": False, "liveseg": -1, "lm": "", "lip": "", "ws": self.ws_count,
-            "fxcount": MODE_COUNT, "palcount": self.palettes.count, "cpalcount": len(self.palettes.custom),
+            "fxcount": MODE_COUNT, "palcount": self.palettes.count + len(self.palettes.custom),
+            "cpalcount": len(self.palettes.custom), "umpalcount": 0, "cpalmax": MAX_CUSTOM,
             "maps": [{"id": 0}], "wifi": wifi_info(),
             "fs": {"u": fs_u, "t": max(1, fs_t), "pmt": self.presets.mtime()},
             "ndc": 0, "arch": platform.machine(), "core": platform.release(),
@@ -875,13 +906,15 @@ class Controller:
                 "effects": effect_names(), "palettes": self.palettes.names}
 
     def palx(self, page):
+        """WLED 16 /json/palx: fixed palettes, then custom ones as IDs 200, 199, ..."""
         per = 8
-        n = self.palettes.count + len(self.palettes.custom)
-        maxp = max(0, (n - 1) // per)
+        nfix = self.palettes.count
+        n = nfix + len(self.palettes.custom)
+        maxp = n // per
         page = clamp(page, 0, maxp)
         out = {}
         for i in range(page * per, min(n, page * per + per)):
-            pid = i if i < self.palettes.count else 255 - (i - self.palettes.count)
+            pid = i if i < nfix else CUSTOM_ID_BASE - (i - nfix)
             out[str(pid)] = self.palettes.preview(pid)
         return {"m": maxp, "p": out}
 

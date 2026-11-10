@@ -10,7 +10,7 @@ from .palettes import tables_from_16, _hex16
 from .segment import FRAMETIME, SOLID_WRAP, color_blend as cb
 
 
-@fx(62, "Oscillate", "@!,!;!,!,!;!")
+@fx(62, "Oscillate", "")
 def oscillate(s, now):
     L = s.L
     d = s.data
@@ -56,7 +56,7 @@ def pride2015(s, now):
     b16 = F.sin16(btheta) + 32768
     bri16 = (b16 * b16) >> 16
     bri8 = ((bri16 * brightdepth) >> 16) + (255 - brightdepth)
-    rgb = F.hsv_rainbow(hue8, sat8, bri8)
+    rgb = s.strip.gamma_inv(F.hsv_rainbow(hue8, sat8, bri8))
     s.buf[:, :3] = cb(s.buf[:, :3], rgb, 64)
     s.buf[:, 3] = 0
     s.step = pseudotime
@@ -76,17 +76,28 @@ def juggle(s, now):
         dothue += 32
 
 
-def _palette_bg(s, now):
-    counter = 0
-    if s.sx:
-        counter = ((now * ((s.sx >> 3) + 1)) & 0xFFFF) >> 8
-    idx = ((s.idx * 255) // max(1, s.L) - counter) & 255
-    s.buf[:] = s.cfp(idx, False, True, 255)
-
-
-@fx(65, "Palette", "@Cycle speed;;!;12;c3=0,o2=0")
+@fx(65, "Palette", "@Shift,Size,Rotation,,,Animate Shift,Animate Rotation,Anamorphic;;!;12;ix=112,c1=0,o1=1,o2=0,o3=1")
 def palette(s, now):
-    _palette_bg(s, now)
+    """WLED 16 mode_palette(): a palette-filled rectangle, rotated and scaled; in 1D each segment is one row."""
+    rows = max(1, sum(1 for x in s.strip.segments if x.is_valid()))
+    y = s.id
+    if not s.o2:
+        theta = (s.c1 + 128) * (math.pi / 256.0)
+    else:
+        theta = ((now * ((s.c1 >> 4) + 1)) & 0xFFFF) * (2 * math.pi / 0xFFFF)
+    sin_t, cos_t = math.sin(theta), math.cos(theta)
+    max_x, max_y = max(1, s.L - 1), max(1, rows - 1)
+    sq = s.o3
+    max_x_in, max_y_in = (max_x, max_y) if sq else (1, 1)
+    max_x_out, max_y_out = (1, 1) if sq else (max_x, max_y)
+    cx, cy = max_x_out / 2.0, max_y_out / 2.0
+    scale = abs(sin_t) + abs(cos_t) * max_y_out / max_x_out
+    yt = cos_t * (y - cy * max_y_in) / (max_y_in * scale)
+    src = sin_t * (s.idx - cx * max_x_in) / (max_x_in * scale) + yt + cx
+    ci = (np.clip(src, 0, max_x_out) * 255 / max_x_out).astype(np.int64)
+    ci = ci * s.ix // 128 if s.ix <= 128 else ((s.ix - 112) * ci) // 16
+    off = s.sx if not s.o1 else ((now * ((s.sx >> 3) + 1)) & 0xFFFF) >> 8
+    s.buf[:] = s.wheel((ci - off) & 255)
 
 
 @fx(66, "Fire 2012", "@Cooling,Spark rate,,2D Blur,Boost;;!;1;pal=35,sx=64,ix=160,m12=1,c2=128")
@@ -115,7 +126,7 @@ def fire2012(s, now):
     s.buf[:] = s.cfp(np.minimum(heat, 240), False, True, 255, blend=False)
 
 
-@fx(67, "Colorwaves", "@!,Hue;!;!")
+@fx(67, "Colorwaves", "@!,Hue;!;!;;pal=26")
 def colorwaves(s, now):
     duration = 10 + s.sx
     brightdepth = F.beatsin88(341, 96, 224, now)
@@ -144,7 +155,7 @@ def bpm(s, now):
     s.buf[:] = s.cfp((stp + s.idx * 2) & 255, False, SOLID_WRAP, 0, (beat - stp + s.idx * 10) & 255)
 
 
-@fx(69, "Fill Noise", "@!;!;!;;pal=9")
+@fx(69, "Fill Noise", "@!;!;!")
 def fill_noise(s, now):
     if s.call == 0:
         s.step = F.random16(12345)
@@ -215,7 +226,7 @@ def colortwinkles(s, now):
             for _t in range(5):
                 i = F.random16(L)
                 if not np.any(s.buf[i]):
-                    s.buf[i, :3] = np.floor(tn[F.random8()] * 65 / 256)
+                    s.buf[i, :3] = np.floor(tn[F.random8()] * (s.strip.gamma_inv(64) + 1) / 256)
                     up[i] = True
                     break
 
@@ -233,48 +244,94 @@ def lake(s, now):
 
 @fx(76, "Meteor", "@!,Trail,,,,Gradient,,Smooth;;!;1")
 def meteor(s, now):
-    if s.o3:
-        return meteor_smooth(s, now)
     L = s.L
+    if L <= 1:
+        s.fill(s.col(0))
+        return
     d = s.data
     if d.get("t") is None or len(d["t"]) != L:
         d["t"] = np.zeros(L, dtype=np.int64)
     tr = d["t"]
+    smooth = s.o3
     size = 1 + L // 20
-    counter = (now * ((s.sx >> 2) + 8)) & 0xFFFF
-    start = (counter * L) >> 16
-    mx = 255 if (s.o1 and s.pal != 5) else 240
-    m = np.random.randint(0, 256, L) <= 255 - s.ix
-    decay = 128 + np.random.randint(0, 127, L)
-    tr[m] = (tr[m] * (decay[m] + 1)) >> 8
-    if s.o1:
-        cols = s.cfp(s.idx, True, False, 0, tr)
+    if smooth:
+        start = ((s.step >> 6 & 0xFF) * (L - 1)) // 255
     else:
-        cols = s.cfp(tr, False, True, 255)
+        start = (((now * ((s.sx >> 2) + 8)) & 0xFFFF) * L) >> 16
+    mx = 240 if (s.pal == 5 or not s.o1) else 255
+    m = np.random.randint(0, 256, L) <= 255 - s.ix
+    if smooth:
+        up = m & (tr > 0)
+        tr[up] = np.clip(tr[up] + 4 - np.random.randint(0, 24, int(up.sum())), 0, mx)
+        cols = s.cfp(s.idx, True, False, 0, tr) if s.o1 else s.cfp(tr, False, True, 255)
+    else:
+        tr[m] = (tr[m] * (129 + np.random.randint(0, 127, int(m.sum())))) >> 8      # scale8(t, 128 + random8(127))
+        if s.o1:
+            cols = s.cfp(tr, False, False, 255, 255 if s.pal in (35, 36) else tr)
+        else:
+            cols = s.cfp((s.idx * mx) // L, False, False, 0, tr)
     s.buf[m] = cols[m]
     j = (start + np.arange(size)) % L
     tr[j] = mx
-    s.buf[j] = s.cfp(j, True, False, 0, 255) if s.o1 else s.cfp(tr[j], False, True, 255)
-
-
-@fx(77, "Meteor Smooth", "@!,Trail,,,,Gradient;;!;1")
-def meteor_smooth(s, now):
-    L = s.L
-    d = s.data
-    if d.get("t") is None or len(d["t"]) != L:
-        d["t"] = np.zeros(L, dtype=np.int64)
-    tr = d["t"]
-    size = 1 + L // 20
-    start = ((s.step >> 6 & 0xFF) * (L - 1)) // 255
-    m = (tr != 0) & (np.random.randint(0, 256, L) <= 255 - s.ix)
-    tr[m] = tr[m] + 3 - np.random.randint(0, 12, int(m.sum()))
-    tr[tr > 245] = 0
-    tr[tr > 240] = 240
-    s.buf[m] = s.cfp(tr[m], False, True, 255)
-    j = (start + np.arange(size)) % L
-    s.buf[j] = cb(s.buf[j], s.cfp(240, False, True, 255), 48)
-    tr[j] = 240
+    if smooth:
+        s.buf[j] = s.cfp(j, True, False, 0, mx) if s.o1 else s.cfp(tr[j], False, True, 255)
+    else:
+        s.buf[j] = s.cfp(tr[j], False, False, 255, 255) if s.o1 else s.cfp((j * mx) // L, False, False, 0, 255)
     s.step += s.sx + 1
+
+
+def _adjust_color(rgb, hue_shift, sat_change, val_change):
+    """WLED 16 adjust_color(): shift hue (0-255 = full circle), add to saturation and value (N,3 arrays)."""
+    if not (hue_shift or sat_change or val_change):
+        return rgb
+    x = rgb / 255.0
+    mx, mn = x.max(axis=1), x.min(axis=1)
+    dlt = mx - mn
+    safe = np.where(dlt > 0, dlt, 1)
+    r, g, b = x[:, 0], x[:, 1], x[:, 2]
+    h = np.where(mx == r, ((g - b) / safe) % 6, np.where(mx == g, (b - r) / safe + 2, (r - g) / safe + 4)) / 6.0
+    h = np.where(dlt > 0, h, 0) + hue_shift / 256.0
+    sat = np.clip(np.where(mx > 0, dlt / np.where(mx > 0, mx, 1), 0) * 255 + sat_change, 0, 255) / 255.0
+    val = np.clip(mx * 255 + val_change, 0, 255) / 255.0
+    out = _hsv_spectrum(h, sat, val)
+    keep = ~(rgb.any(axis=1)) & (val_change <= 0)        # black stays black unless brightened
+    out[keep] = 0
+    return out
+
+
+def _hsv_spectrum(h, sat, val):
+    """HSV (0-1 floats, arrays) to RGB 0-255, the plain "spectrum" conversion WLED 16 uses."""
+    h6 = (np.asarray(h) % 1.0) * 6
+    i = np.floor(h6).astype(np.int64) % 6
+    f = h6 - np.floor(h6)
+    p, q, t = val * (1 - sat), val * (1 - sat * f), val * (1 - sat * (1 - f))
+    r = np.choose(i, [val, q, p, p, t, val])
+    g = np.choose(i, [t, val, val, q, p, p])
+    b = np.choose(i, [p, p, t, val, val, q])
+    return np.round(np.stack([r, g, b], axis=-1) * 255)
+
+
+@fx(77, "Copy Segment", "@,Color shift,Lighten,Brighten,ID,Axis(2D),FullStack(last frame);;;12;ix=0,c1=0,c2=0,c3=0")
+def copy_segment(s, now):
+    """WLED 16: show another segment's pixels (ID slider), optionally from the last full frame, with colour changes."""
+    segs = s.strip.segments
+    if s.c3 >= len(segs) or s.c3 == s.id:
+        s.fade_black(5)
+        return
+    src = segs[s.c3]
+    if not src.is_valid():
+        return
+    out = np.zeros((s.L, 4), np.float32)
+    if s.o2:
+        lf = s.strip.last_frame
+        if lf is not None:
+            seg = lf[src.start:min(src.start + s.L, len(lf))]
+            out[:len(seg)] = seg
+    else:
+        n = min(s.L, src.L)
+        out[:n] = src.buf[:n]
+    out[:, :3] = _adjust_color(out[:, :3], s.ix, s.c1, s.c2)
+    s.buf[:] = out
 
 
 @fx(78, "Railway", "@!,Smoothness;1,2;!;;pal=3")
@@ -298,7 +355,7 @@ def railway(s, now):
     s.step += FRAMETIME
 
 
-def _ripple_base(s, now):
+def _ripple_base(s, now, blur=0):
     L = s.L
     maxr = min(1 + (L >> 2), 100)
     d = s.data
@@ -335,15 +392,17 @@ def _ripple_base(s, now):
             col = s.cfp(np.array(cols)[ok], False, False, 255)
             mag = np.array(mags)[ok]
             s.buf[idx] = cb(s.buf[idx], col, mag)
+    if blur:
+        s.blur(blur)
 
 
-@fx(79, "Ripple", "@!,Wave #,,,,,Overlay;,!;!;12")
+@fx(79, "Ripple", "@!,Wave #,Blur,,,,Overlay;,!;!;12;c1=0")
 def ripple(s, now):
-    if not s.o2:
-        s.fill(s.col(1))
-    else:
+    if s.c1 or s.o2:
         s.fade_out(250)
-    _ripple_base(s, now)
+    else:
+        s.fill(s.col(1))
+    _ripple_base(s, now, s.c1 >> 1)
 
 
 @fx(99, "Ripple Rainbow", "@!,Wave #;;!;12")
@@ -378,7 +437,8 @@ def _twinklefox(s, now, cat):
     div = 3 + ((255 - s.sx) >> 3) if s.sx > 100 else 22 + ((100 - s.sx) >> 1)
     bg = s.col(1)[:3]
     bgl = bg.sum() / 3
-    bg = np.floor(bg * ((16 if bgl > 64 else 64 if bgl > 16 else 86) / 256.0))
+    k = s.strip.gamma_inv(16 if bgl > 64 else 64 if bgl > 16 else 86)          # color_fade(video) by gamma8inv(k)
+    bg = np.floor(bg * k / 256.0) + ((bg > 0) & (k > 0))
     bgb = bg.sum() / 3
     clock = ((now * d["mult"]) >> 3) + d["offs"]
     ticks = (clock // div) & 0xFFFF
@@ -390,12 +450,12 @@ def _twinklefox(s, now, cat):
     density = (s.ix >> 5) + 1
     lit = ((slow8 & 0x0E) // 2) < density
     if cat:
-        bright = 255 - fast
+        bright = fast if s.o2 else 255 - fast         # "Reverse": fade on, then switch off
     else:
         bright = np.where(fast < 86, fast * 3, 255 - ((fast - 86) + (fast - 86) // 2))
     bright = np.where(lit, bright, 0)
     hue = (slow8 - d["salt"]) & 255
-    c = s.cfp(hue, False, True, 255, bright, blend=False)[:, :3]
+    c = s.cfp(hue, False, True, 255, s.strip.gamma_inv(bright), blend=False)[:, :3]
     if not s.o1:
         cool = np.where(fast >= 128, (fast - 128) >> 4, 0)
         c[:, 1] = np.maximum(c[:, 1] - cool, 0)
@@ -414,44 +474,64 @@ def twinklefox(s, now):
     _twinklefox(s, now, False)
 
 
-@fx(81, "Twinklecat", "@!,Twinkle rate,,,,Cool;!,!;!")
+@fx(81, "Twinklecat", "@!,Twinkle rate,,,,Cool,Reverse;!,!;!")
 def twinklecat(s, now):
     _twinklefox(s, now, True)
 
 
-@fx(82, "Halloween Eyes", "@Duration,Eye fade time,,,,,Overlay;!,!;!;12")
+@fx(82, "Halloween Eyes", "@Eye off time,Eye on time,,,,,Overlay;!,!;!;12")
 def halloween_eyes(s, now):
+    """WLED 16 mode_halloween_eyes(): eyes fade in, blink now and then, stay a while, then go dark."""
     L = s.L
+    space = max(2, L >> 5)
+    width = space // 2
+    eyelen = 2 * width + space
+    if L <= 1 or eyelen >= L:
+        s.fill(s.col(0))
+        return
     d = s.data
     if not s.o2:
         s.fill(s.col(1))
-    if L < 4:
-        return
-    st = d.get("state", 0)
-    if st == 0:
-        w = max(1, L // 40)
-        gap = max(2, min(L - 2 * w, L // 12 + 1))
-        d.update(w=w, gap=gap, pos=F.random16(max(1, L - 2 * w - gap)),
-                 col=s.cfp(F.random8(), False, False, 0), t0=now,
-                 dur=800 + s.sx * 25 + F.random16(1500), fade=150 + s.ix * 4,
-                 blink=now + 400 + F.random16(2500), state=1)
-    elif st == 1 and now - d["t0"] > d["dur"]:
-        d.update(state=2, t0=now)
-    elif st == 2 and now - d["t0"] > d["fade"]:
-        d.update(state=3, t0=now, pause=400 + F.random16(max(1, 4000 - s.sx * 12)))
-    elif st == 3 and now - d["t0"] > d["pause"]:
-        d["state"] = 0
-    st = d["state"]
-    if st in (1, 2):
-        bri = 255 if st == 1 else max(0, 255 - (now - d["t0"]) * 255 // d["fade"])
-        blinking = st == 1 and d["blink"] <= now < d["blink"] + 160
-        if now >= d["blink"] + 160:
-            d["blink"] = now + 800 + F.random16(3000)
-        if not blinking:
-            c = cb(s.col(1), d["col"], bri)
-            p, w, g = d["pos"], d["w"], d["gap"]
-            s.set_range(p, p + w, c)
-            s.set_range(p + w + g, p + 2 * w + g, c)
+    state = d.get("state", 0) % 5
+    duration = max(1, d.get("dur", 0))
+    elapsed = now - d.get("t0", 0)
+    if state == 0:                                          # initialize "on"
+        d["pos"] = random.randrange(0, max(1, L - eyelen - 1))
+        d["col"] = F.random8()
+        duration = 128 + F.random16(s.ix * 64)
+        d["dur"] = duration
+        state = 1
+    if state == 1:                                          # on
+        duration = min(duration, 128 + s.ix * 64)
+        fade_in = elapsed * 2048 // duration
+        bg = s.col(1)
+        c = s.cfp(d["col"], False, False, 0)
+        if fade_in < 256:
+            c = cb(bg, c, fade_in)
+        elif elapsed > 1024:
+            remaining = 0 if elapsed >= duration else duration - elapsed
+            if remaining > 1024 and F.random8() < 4:
+                c = bg
+                state = 2
+                d["blink"] = now + F.random8(8, 128)
+        if not np.array_equal(c, bg):
+            p = d["pos"]
+            s.set_range(p, p + width, c)
+            s.set_range(p + width + space, p + 2 * width + space, c)
+    elif state == 2:                                        # blink
+        if now >= d.get("blink", 0):
+            state = 1
+    elif state == 3:                                        # initialize "off"
+        base = s.sx * 128
+        duration = base + F.random16(base)
+        d["dur"] = duration
+        state = 4
+    if state == 4:
+        duration = min(duration, 2 * s.sx * 128)
+    if elapsed > duration:
+        state = 3 if state in (0, 1, 2) else 0
+        d["t0"] = now
+    d["state"] = state
 
 
 @fx(83, "Solid Pattern", "@Fg size,Bg size;Fg,!;!;;pal=0")
@@ -490,15 +570,26 @@ def _spots(s, now, threshold):
     s.buf[idx] = cb(s.cfp(idx, True, SOLID_WRAP, 0), s.col(1), 255 - svv)
 
 
-@fx(85, "Spots", "@!,Width,,,,,Overlay;!,!;!")
+@fx(85, "Spots", "@Spread,Width,,,,,Overlay;!,!;!")
 def spots(s, now):
     _spots(s, now, (255 - s.sx) << 8)
 
 
-@fx(86, "Spots Fade", "@!,Width,,,,,Overlay;!,!;!")
+@fx(86, "Spots Fade", "@Spread,Width,,,,,Overlay;!,!;!")
 def spots_fade(s, now):
     t = F.triwave16((now * ((s.sx >> 2) + 8)) & 0xFFFF)
     _spots(s, now, (t >> 1) + (t >> 2))
+
+
+def _palette_bg(s, now):
+    """Glitter's palette background (WLED mode_glitter); with speed 0 the palette is not wrapped."""
+    counter = 0
+    if s.sx:
+        counter = ((now * ((s.sx >> 3) + 1)) & 0xFFFF) >> 8
+    idx = ((s.idx * 255) // max(1, s.L) - counter) & 255
+    if s.sx == 0:
+        idx = idx * 240 // 255
+    s.buf[:] = s.cfp(idx, False, True, 255)
 
 
 def _glitter(s, intensity, col):
@@ -830,7 +921,7 @@ def plasma(s, now):
     s.buf[:] = s.cfp(ci, False, SOLID_WRAP, 0, br)
 
 
-@fx(98, "Percent", "@,% of fill,,,,One color;!,!;!")
+@fx(98, "Percent", "@!,% of fill,,,,One color;!,!;!")
 def percent(s, now):
     L = s.L
     pct = min(s.ix, 200)
@@ -868,12 +959,12 @@ def heartbeat(s, now):
     s.buf[:] = cb(s.cfp(s.idx, True, SOLID_WRAP, 0), s.col(1), 255 - (s.aux1 >> 8))
 
 
-PAC1 = tables_from_16(_hex16([0x000507, 0x000409, 0x00030B, 0x00030D, 0x000210, 0x000212, 0x000114, 0x000117,
-                              0x000019, 0x00001C, 0x000026, 0x000031, 0x00003B, 0x000046, 0x14554B, 0x28AA50]))[0]
-PAC2 = tables_from_16(_hex16([0x000507, 0x000409, 0x00030B, 0x00030D, 0x000210, 0x000212, 0x000114, 0x000117,
-                              0x000019, 0x00001C, 0x000026, 0x000031, 0x00003B, 0x000046, 0x0C5F52, 0x19BE5F]))[0]
-PAC3 = tables_from_16(_hex16([0x000208, 0x00030E, 0x000514, 0x00061A, 0x000820, 0x000927, 0x000B2D, 0x000C33,
-                              0x000E39, 0x001040, 0x001450, 0x001860, 0x001C70, 0x002080, 0x1040BF, 0x2060FF]))[0]
+PAC1 = tables_from_16(_hex16([0x002229, 0x001E2F, 0x001934, 0x001938, 0x00143F, 0x001443, 0x00B047, 0x00B04C,
+                              0x00004F, 0x000054, 0x000062, 0x00006F, 0x00007A, 0x000085, 0x47938A, 0x64D08E]))[0]
+PAC2 = tables_from_16(_hex16([0x002229, 0x001E2F, 0x001934, 0x001938, 0x00143F, 0x001443, 0x00B047, 0x00B04C,
+                              0x00004F, 0x000054, 0x000062, 0x00006F, 0x00007A, 0x000085, 0x369B90, 0x4FDC9B]))[0]
+PAC3 = tables_from_16(_hex16([0x00142C, 0x00193B, 0x002247, 0x002551, 0x002C5A, 0x002F63, 0x00346B, 0x003671,
+                              0x003B78, 0x003F7F, 0x00478E, 0x004D9C, 0x0054A9, 0x005AB4, 0x3F7FDC, 0x5A9CFF]))[0]
 
 
 def _pac_layer(L, tbl, cistart, wavescale, bri, ioff):
@@ -906,13 +997,14 @@ def pacifica(s, now):
     c[1] = (c[1] - d21 * F.beatsin88(777, 8, 11, t)) & 0xFFFF
     c[2] = (c[2] - d1 * F.beatsin88(501, 5, 7, t)) & 0xFFFF
     c[3] = (c[3] - d2 * F.beatsin88(257, 4, 6, t)) & 0xFFFF
+    p1, p2, p3 = (PAC1, PAC2, PAC3) if not s.pal else (s._tables()[0],) * 3
     acc = np.tile(np.array([2, 6, 10], np.float32), (L, 1))
-    acc += _pac_layer(L, PAC1, c[0], F.beatsin16(3, 11 * 256, 14 * 256, t), F.beatsin8(10, 70, 130, t),
+    acc += _pac_layer(L, p1, c[0], F.beatsin16(3, 11 * 256, 14 * 256, t), F.beatsin8(10, 70, 130, t),
                       (-F.beat16(301, t)) & 0xFFFF)
-    acc += _pac_layer(L, PAC2, c[1], F.beatsin16(4, 6 * 256, 9 * 256, t), F.beatsin8(17, 40, 80, t),
+    acc += _pac_layer(L, p2, c[1], F.beatsin16(4, 6 * 256, 9 * 256, t), F.beatsin8(17, 40, 80, t),
                       F.beat16(401, t))
-    acc += _pac_layer(L, PAC3, c[2], 6 * 256, F.beatsin8(9, 10, 38, t), (-F.beat16(503, t)) & 0xFFFF)
-    acc += _pac_layer(L, PAC3, c[3], 5 * 256, F.beatsin8(8, 10, 28, t), F.beat16(601, t))
+    acc += _pac_layer(L, p3, c[2], 6 * 256, F.beatsin8(9, 10, 38, t), (-F.beat16(503, t)) & 0xFFFF)
+    acc += _pac_layer(L, p3, c[3], 5 * 256, F.beatsin8(8, 10, 28, t), F.beat16(601, t))
     acc = np.minimum(acc, 255)
     base = F.beatsin8(9, 55, 65, t)
     wave = F.beat8(7, t)
@@ -922,14 +1014,11 @@ def pacifica(s, now):
     o2 = np.minimum(over * 2, 255)
     add = np.stack([over, o2, np.minimum(o2 * 2, 255)], axis=1) * (light > thr)[:, None]
     acc = np.minimum(acc + add, 255)
-    acc[:, 2] = np.floor(acc[:, 2] * 146 / 256)
-    acc[:, 1] = np.floor(acc[:, 1] * 201 / 256)
-    acc = np.maximum(acc, np.array([2, 5, 7], np.float32))
     s.buf[:, :3] = acc
     s.buf[:, 3] = 0
 
 
-@fx(104, "Sunrise", "@Time [min],Width;;!;;sx=60,pal=35")
+@fx(104, "Sunrise", "@Time [min],Width;;!;;pal=35,sx=60")
 def sunrise(s, now):
     L = s.L
     if s.call == 0 or s.sx != s.aux0:
@@ -1010,11 +1099,12 @@ def noise_pal(s, now):
     if now - s.step > 4000 + s.sx * 10:
         s.step = now
         base = F.random8()
+        lo = int(s.strip.gamma_inv(128))                # WLED 16: keeps the pre-16 brightness
         from .palettes import pal16_from_colors
-        cols = [F.hsv_rainbow(base + F.random8(64), 255, F.random8(128, 255))[0],
-                F.hsv_rainbow(base + 128, 255, F.random8(128, 255))[0],
-                F.hsv_rainbow(base + F.random8(92), 192, F.random8(128, 255))[0],
-                F.hsv_rainbow(base + F.random8(92), 255, F.random8(128, 255))[0]]
+        cols = [F.hsv_rainbow(base + F.random8(64), 255, F.random8(lo, 255))[0],
+                F.hsv_rainbow(base + 128, 255, F.random8(lo, 255))[0],
+                F.hsv_rainbow(base + F.random8(92), 192, F.random8(lo, 255))[0],
+                F.hsv_rainbow(base + F.random8(92), 255, F.random8(lo, 255))[0]]
         d["tgt"] = tables_from_16(pal16_from_colors(cols))[0]
     d["cur"] = d["cur"] + np.clip(d["tgt"] - d["cur"], -3, 3)
     idx = F.inoise8(s.idx * scale, s.aux0 + s.idx * scale)
@@ -1046,10 +1136,10 @@ def flow(s, now):
         zones += 1
     zones = max(2, zones)
     zl = L // zones
-    s.fill(s.cfp((-counter) & 255, False, True, 255))
     if zl <= 0:
         return
-    off = (L - zones * zl) >> 1
+    zones = (L + zl - 1) // zl + 2
+    off = int((L - zones * zl) / 2)                   # C division (truncates towards zero)
     i = np.arange(zl)
     ci = ((i * 255 // zl) - counter) & 255
     cols = s.cfp(ci, False, True, 255)
@@ -1057,7 +1147,9 @@ def flow(s, now):
         led = i if z & 1 else (zl - 1) - i
         if s.rev:
             led = (zl - 1) - led
-        s.buf[off + z * zl + led] = cols
+        px = off + z * zl + led
+        ok = (px >= 0) & (px < L)
+        s.buf[px[ok]] = cols[ok]
 
 
 @fx(111, "Chunchun", "@!,Gap size;!,!;!")
@@ -1165,7 +1257,7 @@ def tv_simulator(s, now):
 
 # ---- later 1D effects that need no audio --------------------------------------------
 
-@fx(147, "Perlin Move", "@!,# of pixels,Fade rate;!,!;!;1;m12=0")
+@fx(147, "Perlin Move", "@!,# of pixels,Fade rate;!,!;!")
 def perlin_move(s, now):
     L = s.L
     s.fade_out(255 - s.c1)
@@ -1177,21 +1269,22 @@ def perlin_move(s, now):
         s.setp(p, s.cfp(p % 255, False, SOLID_WRAP, 0))
 
 
-@fx(179, "Flow Stripe", "@Hue speed,Effect speed;;;1")
+@fx(179, "Flow Stripe", "@Hue speed,Effect speed;;!;pal=11")
 def flow_stripe(s, now):
     L = s.L
+    if L <= 1:
+        s.fill(s.col(0))
+        return
     hl = max(1, L * 10 // 13)
     hue = (now // (s.sx + 1)) & 255
     t = now // (s.ix // 8 + 1)
-    c = (np.abs(s.idx - hl) // hl) * 127
-    c = F.sin8(c)
+    c = F.sin8(((np.abs(s.idx - hl) * 127) // hl) & 255)
     c = F.sin8((c // 2 + t) & 255)
     b = F.sin8((c + t // 8) & 255)
-    s.buf[:, :3] = F.hsv_rainbow((b + hue) & 255, 255, 255)
-    s.buf[:, 3] = 0
+    s.buf[:] = s.cfp((b + hue) & 255, False, True, 3)
 
 
-@fx(184, "Wavesins", "@!,Brightness variation,Starting color,Range of colors,Color variation;!;!;1")
+@fx(184, "Wavesins", "@!,Brightness variation,Starting color,Range of colors,Color variation;!;!")
 def wavesins(s, now):
     i = s.idx
     bri = F.sin8((now // 4 + i * s.ix) & 255)
@@ -1200,3 +1293,251 @@ def wavesins(s, now):
     rng = (s.c2) & 255
     idx = (lo + ((F.sin8(b) * (rng + 1)) >> 8)) & 255
     s.buf[:] = s.cfp(idx, False, SOLID_WRAP, 0, bri)
+
+
+# ---- effects new in WLED 16 (1D, no audio) --------------------------------------------
+
+@fx(48, "Rolling Balls", "@!,# of balls,,,,Collide,Overlay,Trails;!,!,!;!;1;m12=1")
+def rolling_balls(s, now):
+    L = s.L
+    d = s.data
+    nmax = 16
+    n = s.ix // 16 + 1
+    has_c3 = has(s.colors[2])
+    bg = BLACK if has_c3 else s.col(1)
+    if s.call == 0 or "h" not in d:
+        s.fill(bg)
+        v = np.array([20.0 * random.randint(1000, 9999) / 10000.0 for _ in range(nmax)])
+        d.update(t=np.full(nmax, float(now)), v=np.where(np.random.randint(0, 256, nmax) < 128, -v, v),
+                 h=np.array([random.randint(0, 9999) / 10000.0 for _ in range(nmax)]),
+                 m=np.array([random.randint(1000, 9999) / 10000.0 for _ in range(nmax)]))
+    t, v, h, m = d["t"], d["v"], d["h"], d["m"]
+    cfac = float(((8 * (256 - s.sx)) >> 8) + 1) * 20000.0      # scale8(8, 255 - speed) + 1
+    if s.o3:
+        s.fade_out(250)
+    elif not s.o2:
+        s.fill(bg)
+    for i in range(n):
+        th = h[i] + v[i] * (now - t[i]) / cfac
+        if th < -0.5 or th > 1.5:                            # intensity changed: put lost balls back
+            th = h[i] = random.randint(0, 9999) / 10000.0
+            t[i] = now
+        if (th <= 0 and v[i] < 0) or (th >= 1 and v[i] > 0):
+            v[i] = -v[i]
+            t[i] = now
+            h[i] = th
+        if s.o1:                                              # collisions
+            for j in range(i + 1, n):
+                if v[j] != v[i]:
+                    tc = (cfac * (h[i] - h[j]) + v[i] * (t[j] - t[i])) / (v[j] - v[i])
+                    if 2.0 < tc < now - t[j]:
+                        h[i] = h[i] + v[i] * (tc + t[j] - t[i]) / cfac
+                        h[j] = h[i]
+                        t[i] = t[j] = int(tc + 0.5) + t[j]
+                        vi = v[i]
+                        v[i] = ((m[i] - m[j]) * vi + 2.0 * m[j] * v[j]) / (m[i] + m[j])
+                        v[j] = ((m[j] - m[i]) * v[j] + 2.0 * m[i] * vi) / (m[i] + m[j])
+                        th = h[i] + v[i] * (now - t[i]) / cfac
+        if s.pal:
+            c = s.cfp(i * 255 // n, False, SOLID_WRAP, 0)
+        elif has_c3:
+            c = s.col(i % 3)
+        else:
+            c = s.col(0)
+        th = min(max(th, 0.0), 1.0)
+        s.setp(int(round(th * (L - 1))), c)
+        t[i] = now
+        h[i] = th
+
+
+_PAC_YELLOW, _PAC_ORANGEYELLOW, _PAC_WHITEISH, _PAC_BLUE = 0xFFFF00, 0xFFCC00, 0x999999, 0x0000FF
+_PAC_GHOSTS = (0xFF0000, 0xB000B0, 0x00FFFF, 0xFF8800)
+
+
+def _rgb(v):
+    return np.array([(v >> 16) & 255, (v >> 8) & 255, v & 255, 0], np.float32)
+
+
+@fx(151, "PacMan", "@Speed,# of PowerDots,Blink distance,Blur,# of Ghosts,Dots,Smear,Compact;;!;1;"
+                   "m12=0,sx=192,ix=64,c1=64,c2=0,c3=12,o1=1,o2=0")
+def pacman(s, now):
+    """WLED 16 PacMan: PacMan runs along the strip eating power dots, then chases the (blue) ghosts back."""
+    L = s.L
+    d = s.data
+    max_dots = min(L // 10, 255)
+    n_dots = 1 + s.ix * (max_dots - 1) // 255 if max_dots > 1 else 1
+    n_ghosts = 2 + s.c3 * 6 // 31
+    if L <= 16 + 2 * n_ghosts:
+        s.fill(s.col(0))
+        return
+    combined = ((n_dots & 0xFF) << 8) | (n_ghosts & 0xFF)
+    first = s.call == 0 or combined != s.aux0 or "pos" not in d
+    s.aux0 = combined
+    nch = n_ghosts + n_dots + 1
+    if first:
+        d.update(pos=[0] * nch, col=[0] * nch, dir=[True] * nch, blue=[False] * nch, eaten=[False] * nch, top=0)
+        d["col"][0] = _PAC_YELLOW
+        for i in range(1, n_ghosts + 1):
+            d["col"][i] = _PAC_GHOSTS[(i - 1) % 4]
+            d["pos"][i] = -2 * (i + 1)
+        for i in range(n_dots):
+            d["col"][i + n_ghosts + 1] = _PAC_ORANGEYELLOW
+        d["pos"][n_ghosts + 1] = L - 1
+    pos, col, dirn, blue, eaten = d["pos"], d["col"], d["dir"], d["blue"], d["eaten"]
+    max_blink = L - 1 if first else d["top"]
+    max_blink = max(max_blink, 20)
+    start_blink = L // 3 if L < 64 else 20 + s.c1 * (max_blink - 20) // 255
+    if now > s.step:
+        s.step = now
+        s.aux1 = (s.aux1 + 1) & 0xFFFF
+    if not s.o2:
+        s.fill(BLACK)
+    if s.o1:                                                   # dots in front of PacMan
+        for i in range(L - 1, d["top"], -(1 if s.o3 else 2)):
+            s.setp(i, _rgb(_PAC_WHITEISH))
+    every = ((L - 10) << 8) // n_dots
+    for i in range(1, n_dots):
+        pos[i + n_ghosts + 1] = 10 + ((i * every) >> 8)
+    if s.aux1 % 10 == 0:                                       # blink power dots
+        dc = 0 if col[n_ghosts + 1] == _PAC_ORANGEYELLOW else _PAC_ORANGEYELLOW
+        for i in range(n_dots):
+            col[i + n_ghosts + 1] = dc
+    if s.aux1 % 15 == 0 and blue[1] and pos[0] <= start_blink:   # blue ghosts blink near the start
+        gc = _PAC_WHITEISH if col[1] == _PAC_BLUE else _PAC_BLUE
+        for i in range(1, n_ghosts + 1):
+            col[i] = gc
+    for i in range(n_dots):
+        k = i + n_ghosts + 1
+        if not eaten[k] and 0 <= pos[k] < L:
+            s.setp(pos[k], _rgb(col[k]))
+    for j in range(n_dots):
+        k = j + n_ghosts + 1
+        if pos[0] == pos[k] and not eaten[k]:                  # PacMan ate a power dot: everyone turns round
+            for i in range(n_ghosts + 1):
+                dirn[i] = False
+            for i in range(1, n_ghosts + 1):
+                col[i] = _PAC_BLUE
+                blue[i] = True
+            eaten[k] = True
+            break
+    if blue[1] and pos[0] <= 0:                                # back at the start: reset
+        for i in range(n_ghosts + 1):
+            dirn[i] = True
+        for i in range(1, n_ghosts + 1):
+            col[i] = _PAC_GHOSTS[(i - 1) % 4]
+            blue[i] = False
+        if eaten[n_ghosts + 1]:
+            for i in range(n_dots):
+                eaten[i + n_ghosts + 1] = False
+            d["top"] = 0
+    every_n = 15 - (14 * s.sx) // 255
+    if s.aux1 % max(1, every_n) == 0:
+        for i in range(n_ghosts + 1):
+            pos[i] += 1 if dirn[i] else -1
+    for i in range(n_ghosts + 1):
+        if 0 <= pos[i] < L:
+            s.setp(pos[i], _rgb(col[i]))
+    d["top"] = max(d["top"], pos[0])
+    if s.c2 >> 1:
+        s.blur(s.c2 >> 1)
+
+
+@fx(161, "Shimmer", "@Speed,Interval,Size,Granular,Flow,Zebra,Reverse,Sporadic;Fx,Bg,Cx;!;1;"
+                    "pal=15,sx=220,ix=10,c2=0,c3=0")
+def shimmer(s, now):
+    """WLED 16 Shimmer: a soft band of palette colour sweeps over the background, with optional texture."""
+    L = s.L
+    d = s.data
+    radius = ((s.c1 * L) >> 7) + 1
+    speed = (((L + 2 * radius) << 8) << 5) // (200 + (255 - s.sx) * 80)
+    pos = d.get("pos", 0)
+    state = (s.ix << 8) | s.c1
+    if s.call == 0 or state != s.aux1:
+        pos = -(radius << 8)
+        s.aux0 = 0
+        d["last"] = now
+        s.aux1 = state
+    if s.sx:
+        dt = (now - d.get("last", now)) & 0x7F
+        d["last"] = now
+        if s.aux0 > 0:
+            s.aux0 = s.aux0 - dt if s.aux0 > dt else 0
+        else:
+            pos += 1 + ((speed * dt) >> 5)
+            if pos > (L + radius) << 8:
+                s.aux0 = s.ix * 236                            # pause between sweeps
+                if s.o3:
+                    s.aux0 = random.randrange(s.aux0 + 1000)
+                pos = -(radius << 8)
+            d["pos"] = pos
+        if s.o2:
+            pos = (L << 8) - pos
+    else:
+        pos = L << 7
+    i = s.idx
+    dist = np.abs(pos - (i << 8))
+    col = s.cfp(i * 255 // L, False, False, 0)
+    if s.c2:
+        if s.o1:
+            mod = (F.sin16((((i * s.c2) << 6) + ((now * s.c3) << 5)) & 0xFFFF) >> 8) + 128
+        else:
+            mod = F.inoise16((i * s.c2) << 7, (now * s.c3) << 5) >> 8
+        col = np.floor(col * (mod[:, None] / 256.0)) + ((col > 0) & (mod[:, None] > 0))
+    out = cb(col, s.col(1), np.minimum(dist // radius, 255))
+    s.buf[:] = np.where((dist < (radius << 8))[:, None], out, s.col(1))
+
+
+@fx(218, "Color Clouds", "@!,!,Clouds,Colors,Distance,,,Cozy;;!;;sx=24,ix=32,c1=48,c2=64,c3=12,pal=0")
+def color_clouds(s, now):
+    """WLED 16 Color Clouds (noise-driven clouds of colour); WLED's perlin16 is approximated with inoise16."""
+    if s.call == 0:
+        s.aux0, s.aux1 = F.random16(), F.random16()
+    hue_off0 = (s.aux0 + s.aux1) & 255
+    cutoff = 12500 + s.c3 * 900
+    i = s.idx
+    vol = F.inoise16(s.aux0 + i * (8 + s.c1) * 64, now * (1 + s.sx) // 8)
+    vol = np.clip((vol - cutoff) * 255 // (52000 - cutoff), 0, 255)
+    hue = (F.inoise16(s.aux1 + i * s.c2 * 8, now * (1 + s.ix) // 8) >> 7) & 255
+    hue = (hue + hue_off0 + (F.beat88(64, now) >> 8)) & 255
+    if s.o3:                                                   # "Cozy": soft wraparound of the palette
+        hue = F.cos8((128 + hue // 2) & 255)
+    if s.pal:
+        px = s.cfp(hue, False, True, 0, vol)
+    else:
+        px = np.zeros((s.L, 4), np.float32)
+        px[:, :3] = _hsv_spectrum(hue / 256.0, 1.0, vol / 255.0)
+    px[px[:, :3].sum(axis=1) <= 2] = 0                         # suppress flicker of near-black pixels
+    s.buf[:] = px
+
+
+@fx(219, "Slow Transition", "@Time (min),,,,,,Sweep;!;!;1;pal=2,sx=0,ix=0")
+def slow_transition(s, now):
+    """WLED 16: fade very slowly (minutes; 10 s at 0) to the segment's palette/colour whenever it changes."""
+    d = s.data
+    pid = s.pal if s.pal else 2
+    pal = np.array(s.strip.palettes.pal16(pid, s.colors), np.float32)
+    end_w = s.colors[0][3]
+    if s.call == 0 or "end" not in d:
+        d.update(start=pal.copy(), cur=pal.copy(), end=pal.copy(), sw=end_w, cw=end_w, ew=end_w, t0=now)
+        s.aux0, s.aux1 = 0xFFFF, s.sx
+    elif not np.array_equal(d["end"], pal) or s.aux1 != s.sx or d["ew"] != end_w:
+        d.update(start=d["cur"].copy(), end=pal.copy(), sw=d["cw"], ew=end_w, t0=now)
+        s.aux0, s.aux1 = 0, s.sx
+    total = 16 * 255 if s.o2 else 255
+    dur = 10000 if s.sx == 0 else s.sx * 60000
+    expected = min((now - d["t0"]) * total // dur, total)
+    s.aux0 = min(s.aux0, expected)
+    if s.aux0 < expected:
+        s.aux0 = expected
+        if s.o2:                                               # "Sweep": one palette entry at a time
+            k, amt = expected % 16, expected // 16
+            d["cur"][k] = cb(d["start"][k], d["end"][k], amt)
+        else:
+            amt = expected
+            d["cur"] = cb(d["start"], d["end"], amt)
+        d["cw"] = (d["sw"] * (255 - amt) + d["ew"] * amt) // 255
+        if expected >= total:
+            d["cur"], d["cw"] = d["end"].copy(), d["ew"]
+    tbl = tables_from_16(d["cur"])[0]
+    s.buf[:, :3] = tbl[(((s.idx * 255) // s.L) * 0xF0) >> 8]   # LINEARBLEND_NOWRAP
+    s.buf[:, 3] = d["cw"]

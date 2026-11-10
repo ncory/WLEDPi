@@ -28,7 +28,7 @@ DEFAULTS = {
     "assets": "/opt/wled-pi/assets/palettes.json",
     "fps": 42,
     "outputs": [copy.deepcopy(DEFAULT_OUTPUT)],
-    "gamma": {"color": True, "value": 2.8},
+    "gamma": {"color": True, "value": 2.2},  # WLED 16 default; gamma is applied to the whole frame on output
     "abl": {"enabled": False, "max_ma": 5000, "ma_per_led": 55},
     "defaults": {"on": True, "bri": 128, "transition": 7, "boot_preset": 0, "restore_state": True},
     "max_segments": 32,
@@ -78,7 +78,7 @@ def normalize(cfg):
     if not outs:
         outs = [copy.deepcopy(DEFAULT_OUTPUT)]
     c["outputs"] = outs[:4]
-    c["gamma"]["value"] = max(1.0, min(3.5, float(c["gamma"].get("value", 2.8) or 2.8)))
+    c["gamma"]["value"] = max(1.0, min(3.5, float(c["gamma"].get("value", 2.2) or 2.2)))
     c["gamma"]["color"] = bool(c["gamma"].get("color", True))
     c["abl"]["enabled"] = bool(c["abl"].get("enabled"))
     c["abl"]["max_ma"] = _int(c["abl"].get("max_ma"), 250, 100000, 5000)

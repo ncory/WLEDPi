@@ -18,6 +18,7 @@ from .config import normalize, save as save_config
 from .drivers import pi_generation, pin_warnings, resolve_driver, pio_nodes
 from .effects import effect_names, effect_data
 from .httpapi import apply_win, xml_state
+from .palettes import MAX_CUSTOM
 from .state import loads_lenient
 
 log = logging.getLogger("wledpi.http")
@@ -33,6 +34,18 @@ MIME = {".htm": "text/html; charset=utf-8", ".html": "text/html; charset=utf-8",
         ".ttf": "font/ttf", ".txt": "text/plain; charset=utf-8", ".gz": "application/gzip"}
 COMPRESSIBLE = ("text/", "application/javascript", "application/json", "image/svg+xml")
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "web")
+TOOL_DIRS = ("pixelforge", "cpal", "pixart", "pxmagic")    # WLED serves these tools' files from the root
+
+
+def custom_palette_file(name):
+    """True for palette0.json ... palette128.json (WLED 16 custom palette files)."""
+    m = re.fullmatch(r"palette(\d{1,3})\.json", name)
+    return bool(m) and int(m.group(1)) < MAX_CUSTOM
+
+
+def editable_file(name):
+    """Data files the WLED file editor may replace or delete here."""
+    return name in ("presets.json", "skin.css") or custom_palette_file(name)
 
 
 class Req:
@@ -391,7 +404,7 @@ class WledServer:
             return Resp(200, self.ctrl.presets.raw(), "application/json")
         if p == "/cfg.json":
             return jresp(self.ctrl.cfg_json())
-        if re.fullmatch(r"/palette\d\.json", p) or p in ("/skin.css", "/ledmap.json"):
+        if custom_palette_file(p[1:]) or p in ("/skin.css", "/ledmap.json"):
             f = os.path.join(self.ctrl.data_dir, p[1:])
             if os.path.isfile(f):
                 return self._file(req, f)
@@ -500,8 +513,13 @@ class WledServer:
             full = os.path.join(full, "index.htm")
         if os.path.isfile(full):
             return self._file(req, full)
-        if rel == "cpal.htm" and os.path.isfile(os.path.join(base, "cpal", "cpal.htm")):
-            return self._file(req, os.path.join(base, "cpal", "cpal.htm"))
+        # WLED builds its tools into the firmware and serves them from the root (cpal.htm from cpal/cpal.htm,
+        # omggif.js from pixelforge/omggif.js, ...)
+        if "/" not in rel:
+            for sub in TOOL_DIRS:
+                cand = os.path.join(base, sub, rel)
+                if os.path.isfile(cand):
+                    return self._file(req, cand)
         if rel in ("index.htm", "index.html"):
             return self._file(req, os.path.join(WEB_DIR, "fallback.html"))
         if rel == "favicon.ico":
@@ -535,7 +553,7 @@ class WledServer:
                 except (ValueError, UnicodeDecodeError) as e:
                     return Resp(400, "presets.json is not valid: %s" % e)
                 msgs.append("presets.json")
-            elif re.fullmatch(r"palette\d\.json", name) or name in ("skin.css",):
+            elif custom_palette_file(name) or name == "skin.css":
                 if name.endswith(".json"):
                     try:
                         json.loads(data.decode("utf-8"))
@@ -554,25 +572,51 @@ class WledServer:
         return Resp(200, "File Uploaded! (%s)" % ", ".join(msgs))
 
     def _edit(self, req):
-        if req.method == "GET" and req.query.get("edit", "").lstrip("/") == "version-info.json":
+        """WLED 16 file editor (/edit): the page, plus func=list|edit|download|delete on the data directory.
+        Only presets.json, skin.css and custom palette files can be replaced or deleted."""
+        func = req.query.get("func", "")
+        target = req.query.get("path", "") if func == "edit" else req.query.get("edit", "")
+        if req.method == "GET" and target.lstrip("/") == "version-info.json":
             # WLED's UI reads this file to decide whether to offer sending a hardware report to WLED's usage
             # statistics. A Pi is not a WLED device, so always answer "never ask".
             return jresp({"version": WLED_VERSION, "neverAsk": True})
-        path = req.query.get("path") or req.query.get("delete") or ""
-        func = req.query.get("func", "")
+        data_dir = self.ctrl.data_dir
+        if func == "list" or "list" in req.query:
+            out = []
+            for name in sorted(os.listdir(data_dir)):
+                full = os.path.join(data_dir, name)
+                if not name.startswith(".") and os.path.isfile(full):
+                    out.append({"name": name, "type": "file", "size": os.path.getsize(full)})
+            r = jresp(out)
+            r.headers["Cache-Control"] = "no-store"
+            return r
+        path = req.query.get("path") or req.query.get("delete") or req.query.get("edit") or ""
+        name = os.path.basename(path.replace("\\", "/"))
         if req.method == "DELETE" or func == "delete" or "delete" in req.query:
-            name = os.path.basename(path)
-            if not re.fullmatch(r"palette\d\.json", name):
-                return Resp(400, "Only custom palette files can be deleted here")
+            if not editable_file(name):
+                return Resp(403, "WLED-Pi only lets you delete presets.json, skin.css and custom palettes")
             try:
-                os.remove(os.path.join(self.ctrl.data_dir, name))
+                os.remove(os.path.join(data_dir, name))
             except FileNotFoundError:
                 return Resp(404, "Not found")
             with self.ctrl.strip.lock:
-                self.ctrl.palettes.load_custom(self.ctrl.data_dir)
+                if name == "presets.json":
+                    self.ctrl.presets.replace_all({"0": {}})
+                self.ctrl.palettes.load_custom(data_dir)
             self.ctrl.changed()
             return Resp(200, "Deleted")
-        return Resp(404, "The file editor is not available in WLED-Pi")
+        if func in ("edit", "download") or "edit" in req.query:
+            full = os.path.join(data_dir, name)
+            if not name or name.startswith(".") or not os.path.isfile(full):
+                return Resp(404, "Not found")
+            r = self._file(req, full)
+            if func == "download":
+                r.headers["Content-Disposition"] = 'attachment; filename="%s"' % name
+            return r
+        if func:
+            return Resp(400, "Unknown function")
+        page = os.path.join(os.path.realpath(self.cfg["www_dir"]), "edit.htm")
+        return self._file(req, page) if os.path.isfile(page) else Resp(404, "The file editor needs the WLED web UI")
 
     # ------------------------------------------------------------------ settings API
     def _api(self, req):

@@ -8,9 +8,57 @@ import numpy as np
 from . import effects
 from . import effects_more  # noqa: F401  (registers effects)
 from .drivers import make_output, pi_model
-from .segment import Segment, FRAMETIME
+from .segment import Segment, FRAMETIME, style_mask
 
 log = logging.getLogger("wledpi.strip")
+
+
+def _mul(a, b):
+    return np.floor(a * b / 255.0)
+
+
+def _divide(a, b):
+    return np.where(a > b, np.floor(b * 255.0 / np.maximum(a, 1)), 255.0)
+
+
+def blend_layers(mode, top, under):
+    """WLED 16 segment blend modes (index.js "bm" list): top = this segment, under = layers below."""
+    if mode == 0 or mode >= 17:
+        return top
+    t, b = top, under
+    if mode == 1:
+        return b
+    if mode == 2:                                      # add, keeping the colour ratio when it overflows
+        sm = t + b
+        mx = sm.max(axis=1, keepdims=True)
+        return np.where(mx > 255, np.floor(sm * (255.0 / np.maximum(mx, 1))), sm)
+    if mode == 3:
+        return np.maximum(b - t, 0)                    # subtract
+    if mode == 4:
+        return np.abs(b - t)                           # difference
+    if mode == 5:
+        return np.floor((t + b) / 2)                   # average
+    if mode == 6:
+        return _mul(t, b)                              # multiply
+    if mode == 7:
+        return _divide(t, b)                           # divide
+    if mode == 8:
+        return np.maximum(t, b)                        # lighten
+    if mode == 9:
+        return np.minimum(t, b)                        # darken
+    if mode == 10:
+        return 255 - _mul(255 - t, 255 - b)            # screen
+    if mode == 11:
+        return np.where(b < 128, 2 * _mul(t, b), 255 - 2 * _mul(255 - t, 255 - b))   # overlay
+    if mode == 12:
+        return np.where(t < 128, 2 * _mul(t, b), 255 - 2 * _mul(255 - t, 255 - b))   # hard light
+    if mode == 13:
+        return np.floor((b * b * (255 - 2 * t) + 255 * 2 * t * b) / (255 * 255))     # soft light
+    if mode == 14:
+        return _divide(255 - t, b)                     # dodge
+    if mode == 15:
+        return 255 - _divide(t, 255 - b)               # burn
+    return np.where(t.any(axis=1, keepdims=True), t, b)   # 16: stencil (top unless black)
 
 
 class Strip:
@@ -29,6 +77,7 @@ class Strip:
         self.on = True
         self.bri = 128
         self.transition = 7          # x100 ms (persistent)
+        self.blend_style = 0         # WLED 16 "bs": transition style, 0 = fade
         self._bri_from = 0.0
         self._bri_to = 0.0
         self._bri_t0 = 0
@@ -45,6 +94,9 @@ class Strip:
         self._thread = None
         self._wake = threading.Event()
         self._gamma_lut = None
+        self._gamma_inv = None
+        self._power = None           # (t0, dur, turning_on) for a styled global on/off transition
+        self.last_frame = None       # previous composited frame (Copy Segment "FullStack")
         self.setup_outputs()
         self.reset_segments()
 
@@ -73,8 +125,14 @@ class Strip:
             self.total = max(1, total)
             self.has_white = any(o.rgbw for o in self.outputs)
             self.frame = np.zeros((self.total, 4), np.float32)
+            # WLED 16 applies gamma to the whole frame on output; its tables (calcGammaTable) and the inverse
+            # used for opacity and by a few effects to keep their pre-16 look
             g = float(self.cfg["gamma"]["value"]) if self.cfg["gamma"]["color"] else 1.0
-            self._gamma_lut = np.round(((np.arange(256) / 255.0) ** g) * 255).astype(np.float32)
+            i = np.arange(256, dtype=np.float64)
+            self._gamma_lut = np.floor((i / 255.0) ** g * 255.0 + 0.5).astype(np.float32)
+            inv = np.floor((np.maximum(i - 0.5, 0) / 255.0) ** (1.0 / g) * 255.0 + 0.5)
+            inv[0] = 0
+            self._gamma_inv = inv.astype(np.float32)
             # keep segments inside the strip; grow a full-length segment 0 with the strip
             for s in self.segments:
                 if s.start == 0 and s.stop == old_total and len(self.segments) == 1:
@@ -93,9 +151,17 @@ class Strip:
         return [o.error for o in self.outputs if o.error]
 
     # ------------------------------------------------------------------ brightness
+    def gamma_inv(self, v):
+        """WLED gamma8inv(): inverse of the output gamma (identity when gamma correction is off)."""
+        if np.ndim(v) == 0:
+            return float(self._gamma_inv[int(max(0, min(255, v)))])
+        return self._gamma_inv[np.clip(np.asarray(v), 0, 255).astype(np.int64)]
+
     def set_master(self, on=None, bri=None, dur_ms=0):
         cur = self._bri_value()
         if on is not None:
+            if bool(on) != self.on and self.blend_style and dur_ms > 0:
+                self._power = (self.now, int(dur_ms), bool(on))    # styled on/off: segments sweep to/from black
             self.on = bool(on)
         if bri is not None:
             self.bri = max(0, min(255, int(bri)))
@@ -142,14 +208,23 @@ class Strip:
 
     # ------------------------------------------------------------------ rendering
     def render(self):
+        """Run the effects and layer the segments like WLED 16's blendSegment(): each segment is blended over
+        the ones below with its blend mode and (gamma-inverted) opacity; spacing pixels show the layers below."""
         now = self.now
         frame = self.frame
         frame[:] = 0
+        power = None
+        if self._power is not None:
+            t0, dur, turning_on = self._power
+            p = (now - t0) / max(1, dur)
+            if p >= 1:
+                self._power = None
+            else:
+                power = (p, turning_on)
         for seg in self.segments:
             if not seg.is_valid() or seg.L == 0:
                 continue
-            op = seg.opacity()
-            if op <= 0 and not seg.transitioning():
+            if seg.opacity() <= 0 and not seg.transitioning():
                 continue
             if not seg.frz and now >= seg.next_run:
                 ent = effects.EFFECTS.get(seg.fx) or effects.EFFECTS[0]
@@ -165,15 +240,26 @@ class Strip:
                 seg.call += 1
                 seg.next_run = now + r if isinstance(r, (int, np.integer)) and r > FRAMETIME else 0
                 np.clip(seg.buf, 0, 255, out=seg.buf)
-            virt = seg.output()
-            phys = virt[seg.map]
-            if not seg.valid.all():
-                phys = phys * seg.valid[:, None]
-            if op < 255:
-                phys = phys * (op / 255.0)
+            virt, op = seg.output()
+            if power is not None:
+                lit = style_mask(self.blend_style, seg.L, power[0])
+                virt = virt * (lit if power[1] else ~lit)[:, None]
             a = seg.start
             b = min(seg.stop, self.total)
-            frame[a:b] = phys[:b - a]
+            n = b - a
+            m = seg.map[:n]
+            top = virt[m]
+            under = frame[a:b]
+            o = self.gamma_inv(op if np.ndim(op) == 0 else op[m])
+            res = blend_layers(seg.bm, top, under)
+            if np.ndim(o) or o < 255:
+                res = under + (res - under) * ((o[:, None] if np.ndim(o) else o) / 255.0)
+            valid = seg.valid[:n]
+            if valid.all():
+                frame[a:b] = res
+            else:
+                frame[a:b][valid] = res[valid]
+        self.last_frame = frame.copy()
         return frame
 
     def _finish(self, frame):
@@ -211,7 +297,7 @@ class Strip:
                 o.error = str(e)
 
     def _idle(self):
-        if self._bri_value() > 0 or self.nl_bri:
+        if self._bri_value() > 0 or self.nl_bri or self._power is not None:
             return False
         return not any(s.transitioning() for s in self.segments)
 

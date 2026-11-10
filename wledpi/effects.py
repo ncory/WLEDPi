@@ -1,6 +1,6 @@
 """WLED-compatible effects.
 
-Effect IDs and names match WLED 0.15 so presets created on WLED refer to the
+Effect IDs and names match WLED 16 so presets created on WLED refer to the
 same effect here. Each effect is a function f(seg, now_ms) that renders into
 seg.buf (virtual pixels, float RGBW 0-255). Returning an int > FRAMETIME
 requests a custom delay before the next call (like WLED's legacy effects).
@@ -19,7 +19,7 @@ from .segment import FRAMETIME, SOLID_WRAP, color_blend as cb
 from .palettes import tables_from_16, _hex16
 
 EFFECTS = {}          # id -> (name, metadata, function)
-MODE_COUNT = 187      # same ID space as WLED 0.15
+MODE_COUNT = 220      # same ID space as WLED 16
 
 BLACK = np.zeros(4, dtype=np.float32)
 WHITE = np.array([255, 255, 255, 0], dtype=np.float32)
@@ -341,10 +341,12 @@ def twinkle(s, now):
         s.buf[j] = s.cfp(j, True, SOLID_WRAP, 0)
 
 
-def _dissolve(s, now, color_fn):
-    if s.call == 0:
-        s.fill(s.col(1))
+def _dissolve(s, now, color):
+    """WLED 16 dissolve(): color None = palette; "Complete" (o2) waits until every pixel has changed."""
     c1 = s.col(1)
+    if s.call == 0:
+        s.fill(c1)
+        s.aux0 = 1
     for _ in range(s.L // 15 + 1):
         if F.random8() <= s.ix:
             for _t in range(10):
@@ -352,7 +354,11 @@ def _dissolve(s, now, color_fn):
                 same = np.array_equal(s.buf[i], c1)
                 if s.aux0:
                     if same:
-                        s.buf[i] = color_fn(i)
+                        c = s.cfp(i, True, SOLID_WRAP, 0) if color is None else np.array(color, np.float32)
+                        if s.o2 and np.array_equal(c, c1):
+                            c = c.copy()
+                            c[2] = float(int(c[2]) ^ 1)     # differ slightly so "Complete" cannot get stuck
+                        s.buf[i] = c
                         break
                 elif not same:
                     s.buf[i] = c1
@@ -360,21 +366,22 @@ def _dissolve(s, now, color_fn):
     if s.step > (255 - s.sx) + 15:
         s.aux0 = 0 if s.aux0 else 1
         s.step = 0
+    elif s.o2:
+        eq = np.all(s.buf == c1, axis=1)
+        if not (eq.any() if s.aux0 else (~eq).any()):
+            s.step += 1
     else:
         s.step += 1
 
 
-@fx(18, "Dissolve", "@Repeat speed,Dissolve speed,,,,Random;!,!;!")
+@fx(18, "Dissolve", "@Repeat speed,Dissolve speed,,,,Random,Complete;!,!;!")
 def dissolve(s, now):
-    if s.o1:
-        _dissolve(s, now, lambda i: s.wheel(F.random8()))
-    else:
-        _dissolve(s, now, lambda i: s.cfp(i, True, SOLID_WRAP, 0))
+    _dissolve(s, now, s.wheel(F.random8()) if s.o1 else None)
 
 
 @fx(19, "Dissolve Rnd", "@Repeat speed,Dissolve speed;,!;!")
 def dissolve_rnd(s, now):
-    _dissolve(s, now, lambda i: s.wheel(F.random8()))
+    _dissolve(s, now, s.wheel(F.random8()))
 
 
 @fx(20, "Sparkle", "@!,,,,,,Overlay;!,!;!;;m12=0")
@@ -672,7 +679,7 @@ def aurora(s, now):
            (~w["left"] & (w["center"] - w["width"] > L))
     for k in np.nonzero(dead)[0]:
         new_wave(k)
-    backlight = 1 + sum(1 for c in s.colors if has(c))
+    backlight = s.strip.gamma_inv(sum(1 for c in s.colors if has(c)))   # WLED 16: 0-3, gamma inverted
     i = s.idx[:, None].astype(np.float64)
     off = np.abs(i - w["center"][None, :])
     inside = off <= w["width"][None, :]
@@ -764,7 +771,7 @@ def scanner(s, now):
     _larson(s, now, s.o1)
 
 
-@fx(60, "Scanner Dual", "@!,Trail,Delay,,,,Bi-delay;!,!,!;!;;m12=0,c1=0")
+@fx(60, "Scanner Dual", "@!,Trail,Delay,,,Dual,Bi-delay;!,!,!;!;;m12=0,c1=0")
 def scanner_dual(s, now):
     _larson(s, now, True)
 
@@ -788,7 +795,7 @@ def lighthouse(s, now):
     s.aux0 = index
 
 
-@fx(59, "Multi Comet", "@!,Fade;!,!,!;!")
+@fx(59, "Multi Comet", "@!,Fade;!,!;!;1")
 def multi_comet(s, now):
     it = now // (10 + (255 - s.sx))
     if s.step == it:
@@ -796,7 +803,7 @@ def multi_comet(s, now):
     d = s.data
     if "c" not in d:
         d["c"] = [s.L] * 8
-    s.fade_out(s.ix)
+    s.fade_out(s.ix // 2 + 128)
     for k in range(8):
         if d["c"][k] < s.L:
             i = d["c"][k]
@@ -1062,28 +1069,36 @@ def lightning(s, now):
 
 @fx(58, "ICU", "@!,!,,,,,Overlay;!,!;!")
 def icu(s, now):
+    """WLED 16: a small state machine (pause, blink, pause, move) redrawn every frame."""
     L = s.L
-    dest = s.step & 0xFFFF
+    now16 = now & 0xFFFF
+    dest = s.aux1
     space = (s.ix >> 3) + 2
-    if not s.o2:
-        s.fill(s.col(1))
-    span = max(1, L - L // space)
-    col = s.cfp((dest * 255) // span, False, False, 0)
-    s.setp(dest, col)
-    s.setp(dest + L // space, col)
-    if s.aux0 == dest:
-        if F.random8(6) == 0:
-            s.setp(dest, s.col(1))
-            s.setp(dest + L // space, s.col(1))
-            return 200
-        s.aux0 = F.random16(span)
-        return 1000 + F.random16(2000)
-    if s.aux0 > s.step:
-        s.step += 1
-        dest += 1
-    elif s.aux0 < s.step:
-        s.step -= 1
-        dest -= 1
-    s.setp(dest, col)
-    s.setp(dest + L // space, col)
-    return 5 + (50 * (255 - s.sx)) // L
+    gap = L // space
+    state, nxt = s.step >> 16, s.step & 0xFFFF
+    col = s.cfp((dest * 255) // max(1, L - gap), False, False, 0)
+    s.fill(BLACK if s.o2 else s.col(1))
+    if state != 1:
+        s.setp(dest, col)
+        s.setp(dest + gap, col)
+        if state == 3:
+            dest += 1 if s.aux0 > s.aux1 else (-1 if s.aux0 < s.aux1 else 0)
+            s.setp(dest, col)
+            s.setp(dest + gap, col)
+    if ((now16 - nxt) & 0xFFFF) < 0x8000:
+        if state == 0:
+            if F.random8(6) == 0:                       # blink once in a while
+                state, nxt = 1, now16 + 200
+            else:
+                state, nxt = 2, now16 + 500 + F.random16(1000)
+        elif state == 1:
+            state, nxt = 2, now16 + 500 + F.random16(1000)
+        elif state == 2:
+            s.aux0 = F.random16(max(1, L - gap))        # new destination
+            state, nxt = 3, now16
+        else:
+            s.aux1 = dest
+            nxt = now16 + 5 + (50 * (255 - s.sx)) // L
+            if s.aux0 == dest:
+                state, nxt = 0, now16 + 500 + F.random16(1000)
+    s.step = (state << 16) | (nxt & 0xFFFF)

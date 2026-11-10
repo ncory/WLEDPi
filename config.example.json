@@ -17,7 +17,7 @@
       "pio_passthrough": true
     }
   ],
-  "gamma": { "color": true, "value": 2.8 },
+  "gamma": { "color": true, "value": 2.2 },
   "abl": { "enabled": false, "max_ma": 5000, "ma_per_led": 55 },
   "defaults": { "on": true, "bri": 128, "transition": 7, "boot_preset": 0, "restore_state": true },
   "max_segments": 32,

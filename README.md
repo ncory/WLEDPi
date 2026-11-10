@@ -7,10 +7,13 @@ WLED keep working.
 
 What you get:
 
-- WLED's web UI (version 0.15.3, downloaded from the WLED project at install time)
-- 118 of WLED's 1D effects with the same effect IDs, all 71 palettes, custom palettes
-- Segments with grouping, spacing, offset, mirror, reverse, freeze, per-segment brightness and individual-LED control
-- Presets, playlists, quick-load labels, nightlight, transitions, live "Peek" view
+- WLED's web UI (version 16.0.1, downloaded from the WLED project at install time), including its palette
+  editor and file editor
+- 123 of WLED's 1D effects with WLED 16's effect IDs, all 72 palettes, custom palettes
+- Segments with grouping, spacing, offset, mirror, reverse, freeze, per-segment brightness, individual-LED control
+  and WLED 16's segment layering (blend modes such as add, multiply, lighten)
+- Presets, playlists, quick-load labels, nightlight, transitions (fade or WLED 16's swipe, push, fairy dust and
+  inside-out styles), live "Peek" view
 - The WLED JSON API (`/json`, `/json/state`, `/json/si`, …), WebSocket (`/ws`) and the common `/win&…` HTTP API
 - Same `presets.json` format: export from an ESP32 WLED and restore it here, or the reverse
 - A settings page for LED outputs, pins, power limiting, startup behaviour and the web port
@@ -38,7 +41,7 @@ the WLED web UI, creates `/etc/wled-pi/config.json`, offers to add the needed li
 Then open `http://<pi-name>.local:8080/`. Settings are at `/settings` (also via WLED's Config button).
 
 Re-running `install.sh` upgrades the code and keeps settings and presets. Other options: `--yes`
-(non-interactive), `--no-boot-config`, `--no-mdns`, and `--ui-file WLED-0.15.3.tar.gz` for offline installs
+(non-interactive), `--no-boot-config`, `--no-mdns`, and `--ui-file WLED-16.0.1.tar.gz` for offline installs
 (download the tarball from WLED's GitHub releases on another computer).
 
 ## Wiring and pins
@@ -86,14 +89,20 @@ Config → Security & Updates → Backup presets; on WLED-Pi open Settings → P
 `/presets.json` can also be downloaded directly. Presets referencing effects WLED-Pi does not implement fall back
 to Solid.
 
-Custom palettes made with WLED's palette editor are stored as `palette0.json` … `palette9.json` in
-`/var/lib/wled-pi`.
+Custom palettes made with WLED's palette editor are stored as `palette0.json`, `palette1.json`, … (up to
+`palette128.json`) in `/var/lib/wled-pi`. As in WLED 16 they have palette IDs 200, 199, …; presets from WLED 0.15
+that used custom palettes (IDs 255, 254, …) fall back to the default palette, exactly as they do on WLED 16.
+
+Colours follow WLED 16: palettes are stored without gamma and gamma correction (default 2.2) is applied to the whole
+output, so effects and palettes look the same as on an ESP running WLED 16.
 
 ## Effects
 
-Implemented (WLED IDs): 0–47, 49–52, 54–113, 115–117, plus Perlin Move (147), Flow Stripe (179) and Wavesins (184).
-Most follow WLED's algorithms closely. Fairy (49), Fairytwinkle (51), Halloween Eyes (82), Dancing Shadows (112) and
-TV Simulator (116) are close approximations rather than ports. Effects that are 2D-only or need audio are not listed in the UI.
+Implemented (WLED 16 IDs): 0–52, 54–113, 115–117, plus Perlin Move (147), PacMan (151), Shimmer (161),
+Flow Stripe (179), Wavesins (184), Color Clouds (218) and Slow Transition (219). Most follow WLED 16's algorithms
+closely. Fairy (49), Fairytwinkle (51), Dancing Shadows (112) and TV Simulator (116) are close approximations rather
+than ports, and Shimmer and Color Clouds use a different noise function from WLED 16. Not implemented, so not listed
+in the UI: Image (53, GIFs), WLED 16's particle-system effects, and 2D-only or audio-reactive effects.
 
 ## Files
 

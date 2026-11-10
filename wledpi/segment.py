@@ -16,6 +16,54 @@ def color_blend(a, b, amt):
     return a + (np.asarray(b, dtype=np.float32) - a) * (amt / 255.0)
 
 
+# WLED 16 transition styles ("bs") on a 1D segment: which part of the segment already shows the new state.
+# 2D-only styles have no 1D clipping in WLED, so they switch at once.
+_STYLE_RIGHT = {2, 10, 13, 16, 20, 23}       # swipe/push right (and the 2D diagonals that sweep left->right)
+_STYLE_LEFT = {3, 11, 12, 17, 21, 22}        # swipe/push left
+_STYLE_OUT_IN, _STYLE_IN_OUT, _STYLE_OPEN_H, _STYLE_FAIRY = 4, 5, 8, 1
+_STYLE_PUSH_RIGHT, _STYLE_PUSH_LEFT = 16, 17
+
+
+def _hash_int(k):
+    """WLED hashInt() on an int array (uint32 arithmetic)."""
+    s = k.astype(np.uint64)
+    s = (((s >> 16) ^ s) * 0x45d9f3b) & 0xFFFFFFFF
+    s = (((s >> 16) ^ s) * 0x45d9f3b) & 0xFFFFFFFF
+    return (s >> 16) ^ s
+
+
+def style_mask(style, n, prog):
+    """Boolean mask (length n) of virtual pixels that show the new state at progress 0..1, as WLED 16's
+    Segment::isPixelClipped() + setClippingRect() in blendSegment()."""
+    if style == 0 or n <= 1 or prog >= 1:
+        return np.ones(n, dtype=bool)
+    p16 = int(prog * 0xFFFF)
+    k = np.arange(n)
+    dw = p16 * n // 0xFFFF + 1
+    if style in _STYLE_RIGHT:
+        return k < dw
+    if style in _STYLE_LEFT:
+        return k >= n - dw
+    if style == _STYLE_OUT_IN:
+        dw = (0xFFFF - p16) * n // 0xFFFF + 1
+        return (k < (n - dw) // 2) | (k >= (n + dw) // 2)
+    if style in (_STYLE_IN_OUT, _STYLE_OPEN_H):
+        return (k >= (n - dw) // 2) & (k < (n + dw) // 2)
+    if style == _STYLE_FAIRY:
+        pos = (_hash_int(k) % n) * 0xFFFF // n
+        return p16 > pos
+    return np.ones(n, dtype=bool)
+
+
+def push_index(style, n, prog):
+    """Source index for "push" styles (the canvas slides in), else None."""
+    if style not in (_STYLE_PUSH_RIGHT, _STYLE_PUSH_LEFT) or n <= 1 or prog >= 1:
+        return None
+    off = (0xFFFF - int(prog * 0xFFFF)) * n // 0xFFFF
+    k = np.arange(n)
+    return (k + off) % n if style == _STYLE_PUSH_RIGHT else (k - off + n) % n
+
+
 class Segment:
     def __init__(self, strip, sid, start=0, stop=0):
         self.strip = strip
@@ -47,6 +95,9 @@ class Segment:
         self.o3 = False
         self.si = 0
         self.m12 = 0
+        self.bm = 0             # WLED 16 blend mode with the layers below (0 = top)
+        self._defpal_fx = None
+        self._defpal = 6
         # runtime
         self.L = 0
         self.buf = np.zeros((0, 4), dtype=np.float32)
@@ -116,7 +167,14 @@ class Segment:
         return (c[3] << 24) | (c[0] << 16) | (c[1] << 8) | c[2]
 
     def _tables(self):
-        return self.strip.palettes.tables(self.pal, self.colors)
+        pid = self.pal
+        if pid == 0:            # WLED 16: "Default" = the effect's default palette ("pal=" in its metadata), else Party
+            if self._defpal_fx != self.fx:
+                from .effects import effect_defaults
+                p = effect_defaults(self.fx).get("pal", 0)
+                self._defpal, self._defpal_fx = (p if p > 0 else 6), self.fx
+            pid = self._defpal
+        return self.strip.palettes.tables(pid, self.colors)
 
     def cfp(self, i, mapping=False, wrap=True, mcol=0, pbri=255, blend=True):
         """color_from_palette. i: int or int array. Returns (4,) or (N,4) float32."""
@@ -240,16 +298,29 @@ class Segment:
         return self.op_dur > 0 or self.xf_buf is not None
 
     def output(self):
-        """Virtual buffer including effect cross-fade."""
+        """(virtual buffer, opacity) including the running transition. With WLED 16's fade style the old
+        and new state are blended; with the other styles each pixel shows either the old or the new state
+        (and the matching opacity), so opacity may come back as a per-pixel array."""
+        style = self.strip.blend_style
         out = self.buf
         if self.xf_buf is not None:
             p = (self.strip.now - self.xf_t0) / max(1, self.xf_dur)
             if p >= 1 or len(self.xf_buf) != self.L:
                 self.xf_buf = None
-            else:
+            elif style == 0:
                 out = self.xf_buf + (self.buf - self.xf_buf) * p
+            else:
+                idx = push_index(style, self.L, p)
+                new, old = (self.buf, self.xf_buf) if idx is None else (self.buf[idx], self.xf_buf[idx])
+                out = np.where(style_mask(style, self.L, p)[:, None], new, old)
         self._last_out = out
-        return out
+        if style == 0 or self.op_dur <= 0:
+            return out, self.opacity()
+        p = (self.strip.now - self.op_t0) / self.op_dur
+        if p >= 1:
+            self.op_dur = 0
+            return out, self.op_to
+        return out, np.where(style_mask(style, self.L, p), self.op_to, self.op_from)
 
     # ------------------------------------------------------------------ misc
     def light_caps(self):

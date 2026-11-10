@@ -1,10 +1,14 @@
-"""Palettes, using WLED's palette IDs.
+"""Palettes, using WLED 16's palette IDs.
 
-IDs 0-12 are built in (FastLED palettes + colour based ones). IDs 13+ are the
+IDs 0-12 are built in (FastLED palettes + colour based ones). IDs 13-71 are the
 cpt-city gradient palettes from WLED; their data is extracted from the WLED
 source by tools/fetch_wled_assets.py at install time (assets/palettes.json).
-Custom palettes (palette0.json ... palette9.json in the data dir) map to IDs
-255, 254, ... exactly like WLED.
+Custom palettes (palette0.json, palette1.json, ... in the data dir) map to IDs
+200, 199, ... exactly like WLED 16; a missing file leaves a grey placeholder so
+later palettes keep their IDs. IDs 201-255 are WLED's usermod palettes (none here).
+
+Like WLED 16, palette colours are stored without gamma: the strip applies gamma
+to the whole frame on output (see strip.py).
 """
 import json
 import logging
@@ -26,11 +30,23 @@ NAMES = [
     "April Night", "Orangery", "C9", "Sakura", "Aurora", "Atlantica", "C9 2", "C9 New", "Temperature",
     "Aurora 2", "Retro Clown", "Candy", "Toxy Reaf", "Fairy Reaf", "Semi Blue", "Pink Candy", "Red Reaf",
     "Aqua Flash", "Yelblu Hot", "Lite Light", "Red Flash", "Blink Red", "Red Shift", "Red Tide", "Candy2",
+    "Traffic Light",
 ]
+FIXED_PALETTE_COUNT = len(NAMES)    # 72: 0-71
+CUSTOM_ID_BASE = 200                # custom palette 0 = ID 200, 1 = 199, ...
+USERMOD_ID_BASE = 255               # WLED usermod palettes (unused here)
+MAX_CUSTOM = CUSTOM_ID_BASE - FIXED_PALETTE_COUNT + 1   # 129 slots, as WLED on ESP32
+MAX_CUSTOM_GAP = 20                 # stop looking after this many missing files in a row
+GREY_PLACEHOLDER = [0, 128, 128, 128, 255, 128, 128, 128]
 
 
 def _hex16(vals):
     return np.array([[(v >> 16) & 255, (v >> 8) & 255, v & 255] for v in vals], dtype=np.float32)
+
+
+def _gc22(p):
+    """Inverse gamma 2.2, as WLED 16 applies to FastLED palettes meant to be shown without gamma."""
+    return np.round(255.0 * (p / 255.0) ** (1 / 2.2)).astype(np.float32)
 
 
 PARTY = _hex16([0x5500AB, 0x84007C, 0xB5004B, 0xE5001B, 0xE81700, 0xB84700, 0xAB7700, 0xABAB00,
@@ -49,6 +65,8 @@ RAINBOW_STRIPE = _hex16([0xFF0000, 0, 0xAB5500, 0, 0xABAB00, 0, 0x00FF00, 0,
                          0x00AB55, 0, 0x0000FF, 0, 0x5500AB, 0, 0xAB0055, 0])
 HEAT = _hex16([0x000000, 0x330000, 0x660000, 0x990000, 0xCC0000, 0xFF0000, 0xFF3300, 0xFF6600,
                0xFF9900, 0xFFCC00, 0xFFFF00, 0xFFFF33, 0xFFFF66, 0xFFFF99, 0xFFFFCC, 0xFFFFFF])
+
+PARTY, RAINBOW, RAINBOW_STRIPE = _gc22(PARTY), _gc22(RAINBOW), _gc22(RAINBOW_STRIPE)   # WLED 16 "_gc22"
 
 BUILTIN16 = {0: PARTY, 6: PARTY, 7: CLOUD, 8: LAVA, 9: OCEAN, 10: FOREST, 11: RAINBOW, 12: RAINBOW_STRIPE}
 
@@ -140,7 +158,7 @@ class PaletteBank:
 
     def __init__(self):
         self.gradients = {}      # id -> stops list
-        self.custom = []         # list of stops lists (palette0.json -> 255 ...)
+        self.custom = []         # list of stops lists (palette0.json -> 200, ...), incl. grey placeholders
         self.names = list(NAMES)
         self._cache = {}
         # random palette (ID 1)
@@ -159,7 +177,11 @@ class PaletteBank:
             need = max([len(NAMES)] + [k + 1 for k in self.gradients])
             if isinstance(names, list) and len(names) >= need and all(isinstance(n, str) for n in names):
                 self.names = names
-            log.info("Loaded %d gradient palettes from %s", len(self.gradients), path)
+            log.info("Loaded %d gradient palettes from %s (%s)", len(self.gradients), path, data.get("source", "?"))
+            src = str(data.get("source", ""))
+            if src.startswith("WLED v0."):
+                log.warning("%s comes from %s, whose palettes include gamma; colours will be too dark. "
+                            "Re-run tools/fetch_wled_assets.py to update to WLED 16.", path, src)
         except FileNotFoundError:
             log.warning("Palette assets %s not found; gradient palettes use approximations", path)
         except Exception as e:  # noqa
@@ -168,10 +190,14 @@ class PaletteBank:
 
     def load_custom(self, data_dir):
         self.custom = []
-        for i in range(10):
+        gap = 0
+        for i in range(MAX_CUSTOM):
             p = os.path.join(data_dir, "palette%d.json" % i)
             if not os.path.exists(p):
-                break
+                gap += 1
+                if gap > MAX_CUSTOM_GAP:
+                    break
+                continue
             try:
                 with open(p) as f:
                     raw = json.load(f).get("palette", [])
@@ -185,11 +211,28 @@ class PaletteBank:
                     else:
                         stops += [int(v) for v in raw[j:j + 4]]
                         j += 4
-                self.custom.append(stops)
+                if len(stops) < 8:
+                    raise ValueError("fewer than 2 entries")
             except Exception as e:  # noqa
                 log.warning("Bad custom palette %s: %s", p, e)
-                break
+                continue                    # like WLED: skipped, so later palettes move up one ID
+            self.custom += [list(GREY_PLACEHOLDER) for _ in range(gap)]
+            gap = 0
+            self.custom.append(stops)
         self._cache.clear()
+
+    def custom_index(self, pid):
+        """Index into self.custom for a palette ID, or None."""
+        if FIXED_PALETTE_COUNT <= pid <= CUSTOM_ID_BASE:
+            i = CUSTOM_ID_BASE - pid
+            return i if i < len(self.custom) else None
+        return None
+
+    def valid_id(self, pid):
+        """WLED 16 Segment::setPalette(): unknown custom/usermod IDs fall back to 0."""
+        if pid >= FIXED_PALETTE_COUNT and self.custom_index(pid) is None:
+            return 0
+        return pid
 
     @property
     def count(self):
@@ -206,17 +249,16 @@ class PaletteBank:
             self.rand_version += 1
 
     def stops_for(self, pid):
-        if pid >= 246:
-            i = 255 - pid
-            return self.custom[i] if i < len(self.custom) else None
+        if pid >= FIXED_PALETTE_COUNT:
+            i = self.custom_index(pid)
+            return self.custom[i] if i is not None else None
         if pid in self.gradients:
             return self.gradients[pid]
         return FALLBACK_GRADIENTS.get(pid)
 
     def pal16(self, pid, colors):
         """16 entry palette for palette id; colors = list of 3 RGBW colour lists of the segment."""
-        if pid >= 246 and (255 - pid) >= len(self.custom):
-            pid = 0
+        pid = self.valid_id(pid)
         if pid in BUILTIN16:
             return BUILTIN16[pid]
         if pid == 1:
@@ -262,9 +304,9 @@ class PaletteBank:
             return ["c3", "c2", "c1"]
         if pid == 5:
             return ["c1"] * 5 + ["c2"] * 5 + ["c3"] * 5 + ["c1"]
-        if pid in BUILTIN16:
-            p = BUILTIN16[pid]
-            return [[int(i * 255 / 15), int(p[i][0]), int(p[i][1]), int(p[i][2])] for i in range(16)]
+        if pid in BUILTIN16 or self.custom_index(pid) is not None:
+            p = self.pal16(pid, None)       # WLED sends these as 16 entries (index i << 4)
+            return [[i << 4, int(p[i][0]), int(p[i][1]), int(p[i][2])] for i in range(16)]
         st = self.stops_for(pid)
         if not st:
             p = RAINBOW
